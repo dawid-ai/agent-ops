@@ -6,7 +6,7 @@ import { freemem } from 'node:os';
 import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
-import type { AgentDef, Priority, Root, TaskView, UserConfig } from '@agent-ops/core';
+import type { AgentDef, Priority, Root, Route, TaskView, UserConfig } from '@agent-ops/core';
 import type { SyncResult } from '@agent-ops/core';
 import {
   assertActor,
@@ -29,6 +29,7 @@ import {
   projectRefs,
   QUESTION_TYPE,
   READ_ONLY_CAN_CLAIM,
+  takesGroupWork,
   taskRefs,
   writePresence,
   syncAll,
@@ -185,6 +186,8 @@ function sleepUnless(ms: number, signal: AbortSignal): Promise<void> {
 export const MERGE_ACTOR = 'opsd:merge';
 /** Who tells the human that a checkout's changes hold writing runs (AO-0137), and where. */
 export const DIRTY_ACTOR = 'opsd:checkout';
+/** Who gives ownerless work a role group as its owner (AO-0140). */
+export const ROUTE_ACTOR = 'opsd:router';
 const DIRTY_CHANNEL = 'general';
 /** Rebase, check and fast-forward rounds before a merge gives up on a base that keeps moving. */
 const MERGE_ATTEMPTS = 5;
@@ -1972,8 +1975,12 @@ export class Supervisor extends EventEmitter {
       this.dirtyHolds = new Map();
       try {
         this.runSchedules();
+        // Before wake, so a task a repeat creates now can start this tick.
+        this.safe(() => this.runRepeats());
         // Before wake: a person waiting for a reply comes before inbox work of the same agent.
         if (!this.stopping) this.safe(() => this.chat.tick());
+        // Before wake, so an accepted finding gets its owner and starts in the same tick.
+        if (!this.stopping) this.routeOwners();
         this.wake();
       } finally {
         const holds = this.dirtyHolds;
@@ -2670,6 +2677,16 @@ export class Supervisor extends EventEmitter {
     return env;
   }
 
+  /**
+   * Creates the tasks of due repeats (AO-0142). Paused opsd creates none; on resume or the next
+   * start each repeat fires once for the latest slot it missed.
+   */
+  private runRepeats(): void {
+    if (!this.config.repeats || this.config.paused || this.stopping) return;
+    const fired = this.ws().fireRepeats();
+    if (fired.length > 0) this.emit('repeats', fired);
+  }
+
   private runSchedules(): void {
     if (this.config.schedules.length === 0) return;
     const last = this.store.readJson<Record<string, number>>('schedules.json', {});
@@ -2737,6 +2754,30 @@ export class Supervisor extends EventEmitter {
     return Object.entries(this.config.agents)
       .filter(([, c]) => c.wake)
       .map(([a]) => a);
+  }
+
+  /**
+   * The routes `routeOwners` writes: ownerless work and the role group that wakes for it. Uses
+   * the role limits `wakeCandidates` filters by, so a routed task has an agent it may start.
+   */
+  private plannedRoutes(ws: Workspace = this.ws()): Route[] {
+    const waking = this.wakingAgents().filter((a) => !roleInactive(ws.agent(a)));
+    return ws.routes(waking, (a) => roleLimits(this.config, roleOf(a)));
+  }
+
+  /**
+   * Gives each open task without a working owner a role group from its type and labels (AO-0140):
+   * a finding a person accepted, or work whose owner no configured agent answers to. Recorded as
+   * an `assign` event from `ROUTE_ACTOR` with the reason.
+   */
+  private routeOwners(): void {
+    this.safe(() => {
+      const ws = this.ws(ROUTE_ACTOR);
+      for (const r of this.plannedRoutes(ws)) {
+        if (r.blocker) continue;
+        this.safe(() => ws.route(`${r.view.root}/${r.view.meta.id}`, r.to, r.reason));
+      }
+    });
   }
 
   /**
@@ -2846,10 +2887,8 @@ export class Supervisor extends EventEmitter {
       // provider of the reviewer the task expects; without overflow, only the first provider.
       const order = (x: string): string[] => roleLimits(this.config, roleOf(x)).providers;
       c.agents = c.agents.filter((x) => {
-        const lim = roleLimits(this.config, roleOf(x));
-        if (!lim.providers.includes(runtimeOf(x))) return false;
         if (c.avoid && !isHuman(c.avoid) && runtimeOf(c.avoid) === runtimeOf(x)) return false;
-        return lim.overflow || runtimeOf(x) === lim.providers[0];
+        return takesGroupWork(x, roleLimits(this.config, roleOf(x)));
       });
       c.agents.sort((x, y) => order(x).indexOf(runtimeOf(x)) - order(y).indexOf(runtimeOf(y)));
     }
@@ -2992,27 +3031,48 @@ export class Supervisor extends EventEmitter {
    * tasks that wait on an id no configured agent answers to, which no wake ever starts.
    */
   waits(): WaitItem[] {
-    const planned: WaitItem[] = this.planWake().steps.map(({ c, reason }) => ({
+    const ws = this.ws();
+    const key = (v: TaskView): string => `${v.root}/${v.meta.id}`;
+    // Ownerless work: opsd routes it at the next tick, or says why it cannot (AO-0140).
+    const routes = new Map(this.plannedRoutes(ws).map((r) => [key(r.view), r]));
+    const routeNote = (r: Route | undefined): string =>
+      !r
+        ? ''
+        : r.blocker
+          ? `; opsd cannot route it: ${r.blocker}`
+          : `; opsd routes it to ${r.to} at the next tick`;
+    const planned: WaitItem[] = this.planWake().steps.map(({ c, agent, reason }) => ({
       kind: c.kind,
       task: c.ref,
       title: c.title,
       project: c.project,
       review: c.kind === 'review',
       agents: c.agents,
-      reason,
+      // An unowned task no agent may take says what routing does about it.
+      reason: reason + (c.kind === 'task' && !agent && c.ref ? routeNote(routes.get(c.ref)) : ''),
     }));
-    const stranded: WaitItem[] = this.ws()
-      .stranded()
-      .map((s) => ({
-        kind: s.role === 'reviewer' ? 'review' : 'task',
-        task: `${s.view.root}/${s.view.meta.id}`,
-        title: s.view.meta.title,
-        project: s.view.meta.project ?? s.view.root,
-        review: s.role === 'reviewer',
+    const stranded: WaitItem[] = ws.stranded().map((s) => ({
+      kind: s.role === 'reviewer' ? 'review' : 'task',
+      task: key(s.view),
+      title: s.view.meta.title,
+      project: s.view.meta.project ?? s.view.root,
+      review: s.role === 'reviewer',
+      agents: [],
+      reason: s.reason + (s.role === 'owner' ? routeNote(routes.get(key(s.view))) : ''),
+    }));
+    const listed = new Set([...planned, ...stranded].map((w) => w.task));
+    const unrouted: WaitItem[] = [...routes.values()]
+      .filter((r) => r.blocker && !listed.has(key(r.view)))
+      .map((r) => ({
+        kind: 'task',
+        task: key(r.view),
+        title: r.view.meta.title,
+        project: r.view.meta.project ?? r.view.root,
+        review: false,
         agents: [],
-        reason: s.reason,
+        reason: `${r.why}${routeNote(r)}`,
       }));
-    return [...planned, ...stranded];
+    return [...planned, ...stranded, ...unrouted];
   }
 
   /** Starts the runs `planWake` plans, recording reviews and inbox items only once started. */

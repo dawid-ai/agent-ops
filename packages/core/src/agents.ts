@@ -146,6 +146,55 @@ export function canClaimType(agent: AgentDef | undefined, type: string, id?: str
   return agent.can_claim.includes('*') || agent.can_claim.includes(type);
 }
 
+/**
+ * The role group that takes a task of each type when it has no owner (AO-0140). `task` and types
+ * not listed here go by the task's labels, then to engineers.
+ */
+export const ROLE_BY_TYPE: Readonly<Record<string, string>> = {
+  bug: 'engineer',
+  feature: 'engineer',
+  task: 'engineer',
+  test: 'qa',
+  qa: 'qa',
+  review: 'reviewer',
+  question: 'pm',
+};
+
+/**
+ * The role group (`*:<role>`) that owns an ownerless task: from its type when the type names one
+ * (`bug`, `test`, `review`), else from its first label that names one (`qa`), else `*:engineer`.
+ */
+export function roleGroupFor(type: string, labels: readonly string[] = []): string {
+  const byType = type !== 'task' ? ROLE_BY_TYPE[type] : undefined;
+  const byLabel = labels.map((l) => ROLE_BY_TYPE[l.toLowerCase()]).find(Boolean);
+  return `*:${byType ?? byLabel ?? 'engineer'}`;
+}
+
+/**
+ * Providers opsd knows before its config lists its own (`opsd.seeded`); the keys of the
+ * supervisor's `DEFAULT_RUNTIMES`, which a test keeps equal.
+ */
+export const DEFAULT_PROVIDERS: readonly string[] = ['claude', 'codex'];
+
+/** Which providers take work owned by `*:<role>` or by nobody: `opsd.roles.<role>`. */
+export interface GroupProviders {
+  /** In order of preference. */
+  providers: readonly string[];
+  /** False: only the first provider takes it. */
+  overflow: boolean;
+}
+
+/**
+ * True when `agent` may take a task owned by `*:<role>` or by nobody: its runtime is one of the
+ * role's providers, and the first one unless overflow is on. opsd's wake planner, routing and the
+ * owner check share it, so a group a task is given to has an agent opsd starts (AO-0140).
+ */
+export function takesGroupWork(agent: string, lim: GroupProviders): boolean {
+  const runtime = agent.slice(0, agent.indexOf(':'));
+  if (!lim.providers.includes(runtime)) return false;
+  return lim.overflow || runtime === lim.providers[0];
+}
+
 /** The parts of a role file a person edits from the app. */
 export interface RoleInput {
   id: string;

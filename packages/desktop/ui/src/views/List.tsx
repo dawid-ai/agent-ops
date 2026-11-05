@@ -15,7 +15,7 @@ import {
 } from '../components';
 import type { TaskFilter } from '../lib/filters';
 import { loadViews, matchesFilter } from '../lib/filters';
-import { ago } from '../lib/format';
+import { ago, ownerlessLabel } from '../lib/format';
 import { dueLabel, STATUSES } from '../lib/identity';
 import type { Task } from '../types';
 import { FilterBar, FilterChip } from '../ui/filters';
@@ -210,7 +210,11 @@ export function List({ nav, preset }: { nav: Nav; preset?: string }) {
                         <StatusTag status={t.status} stale={t.stale} unblocked={t.unblocked} />
                       </td>
                       <td className="max-w-0 py-2 pr-3">
-                        <Who id={t.claimedBy ?? t.owner} />
+                        {!t.claimedBy && ownerlessLabel(t) ? (
+                          <span className="text-xs text-fg-4">{ownerlessLabel(t)}</span>
+                        ) : (
+                          <Who id={t.claimedBy ?? t.owner} />
+                        )}
                       </td>
                       <td className="py-2 pr-3">
                         {due ? (

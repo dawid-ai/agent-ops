@@ -246,6 +246,29 @@ describe('desktop admin api', () => {
         'retype',
         'assign',
       ]);
+      // An idea made a task from the task panel: owner and priority in the same write (AO-0144).
+      const idea = as('human:dawid').newTask({ title: 'Dark mode', type: 'idea' });
+      res = await call('POST', `/api/tasks/${idea.id}/retype`, {
+        as: 'human:dawid',
+        type: 'task',
+        to: 'claude:engineer',
+        priority: 'p1',
+      });
+      expect(res.status).toBe(200);
+      expect(res.data).toMatchObject({
+        task: { type: 'task', owner: 'claude:engineer', priority: 'p1', status: 'todo' },
+      });
+      expect((res.data.events as Array<{ type: string }>).map((e) => e.type)).toEqual([
+        'retype',
+        'priority',
+        'assign',
+      ]);
+      res = await call('POST', `/api/tasks/${idea.id}/retype`, {
+        as: 'human:dawid',
+        type: 'bug',
+        priority: 'urgent',
+      });
+      expect(res.status).toBe(400);
     } finally {
       await api.close();
     }
@@ -451,6 +474,124 @@ describe('desktop admin api', () => {
       expect(sup.config.schedules).toEqual([]);
       res = await call('POST', '/api/schedules/daily-standup/delete');
       expect(res.status).toBe(400);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it('fires repeats on the tick and manages them over the API (AO-0142)', async () => {
+    const repo = temp();
+    execFileSync('git', ['init', '-q'], { cwd: repo, windowsHide: true });
+    initRoot(repo, { name: 'test', human: 'human:dawid' });
+    const userConfig = join(temp(), 'config.yml');
+    // No runs: the test watches the tasks a repeat creates, not who works them.
+    const config = (more: string) =>
+      `me: human:dawid\nopsd:\n  sync: false\n  max_runs: 0\n${more}`;
+    writeFileSync(userConfig, config(''));
+    const env = {
+      ...process.env,
+      OPS_CONFIG: userConfig,
+      OPS_STATE_DIR: temp(),
+    } as NodeJS.ProcessEnv;
+    delete env.OPS_AGENT;
+    delete env.OPS_ROOTS;
+    const clock = { now: new Date(2026, 10, 2, 8, 0).getTime() };
+    const sup = new Supervisor({
+      env,
+      cwd: repo,
+      now: () => clock.now,
+      freeMem: () => 64 * 2 ** 30,
+    });
+    sups.push(sup);
+    const api = await startApi(sup, { port: 0, token: 'admin-token', version: 't', build: '42' });
+    const call = async (method: 'GET' | 'POST', path: string, body?: unknown) => {
+      const res = await fetch(`http://127.0.0.1:${api.port}${path}`, {
+        method,
+        headers: { authorization: 'Bearer admin-token', 'content-type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: res.status, data: (await res.json()) as unknown };
+    };
+    const tasks = () =>
+      new Workspace({ cwd: repo, env, actor: 'human:dawid', user: {} })
+        .list({ all: true })
+        .filter((v) => v.meta.repeat === 'weekly-report');
+    try {
+      let res = await call('POST', '/api/repeats', {
+        name: 'weekly-report',
+        title: 'Weekly report {date}',
+        start: '2026-11-02 09:00',
+        repeat: 'weekly',
+      });
+      expect(res.status).toBe(200);
+      expect(res.data).toEqual([
+        expect.objectContaining({ state: 'active', next: '2026-11-02T09:00' }),
+      ]);
+      expect(
+        (await call('POST', '/api/repeats', { name: 'weekly-report', title: 'x' })).status,
+      ).toBe(400);
+      // An edit names the root it targets; an unknown root is refused.
+      res = await call('POST', '/api/repeats', {
+        replace: true,
+        root: 'test',
+        name: 'weekly-report',
+        title: 'Weekly report {date}',
+        start: '2026-11-02 09:00',
+        repeat: 'weekly',
+      });
+      expect(res.data).toEqual([expect.objectContaining({ root: 'test' })]);
+      res = await call('POST', '/api/repeats', {
+        replace: true,
+        root: 'other',
+        name: 'weekly-report',
+        title: 'x',
+      });
+      expect(res.status).toBe(400);
+
+      await sup.tick();
+      expect(tasks()).toHaveLength(0);
+      clock.now = new Date(2026, 10, 2, 9, 0).getTime();
+      await sup.tick();
+      expect(tasks().map((v) => v.meta.title)).toEqual(['Weekly report 2026-11-02']);
+      await sup.tick();
+      expect(tasks()).toHaveLength(1);
+
+      // Paused from the API: a week passes without a task; resumed, the missed slot fires once.
+      new Workspace({ cwd: repo, env, actor: 'human:dawid', user: {} }).done(
+        tasks()[0]!.meta.id,
+        'ok',
+      );
+      res = await call('POST', '/api/repeats/test%2Fweekly-report/pause');
+      expect(res.data).toMatchObject({ state: 'paused' });
+      clock.now = new Date(2026, 10, 23, 12, 0).getTime();
+      await sup.tick();
+      expect(tasks()).toHaveLength(1);
+      await call('POST', '/api/repeats/weekly-report/resume');
+      await sup.tick();
+      expect(tasks().map((v) => v.meta.repeat_slot)).toEqual([
+        '2026-11-02T09:00',
+        '2026-11-23T09:00',
+      ]);
+
+      // A run's own token cannot manage repeats; run now and delete work for the human.
+      res = await call('POST', '/api/repeats/weekly-report/run');
+      expect(res.status).toBe(201);
+      expect(tasks()).toHaveLength(3);
+      res = await call('POST', '/api/repeats/weekly-report/delete');
+      expect(res.data).toEqual([]);
+      expect((await call('POST', '/api/repeats/weekly-report/delete')).status).toBe(400);
+
+      // `opsd.repeats: false` keeps this PC from firing them.
+      writeFileSync(userConfig, config('  repeats: false\n'));
+      sup.reloadConfig();
+      new Workspace({ cwd: repo, env, actor: 'human:dawid', user: {} }).saveRepeat({
+        name: 'weekly-report',
+        title: 'Again',
+        start: '2026-11-23 10:00',
+      });
+      clock.now = new Date(2026, 10, 23, 11, 0).getTime();
+      await sup.tick();
+      expect(tasks()).toHaveLength(3);
     } finally {
       await api.close();
     }

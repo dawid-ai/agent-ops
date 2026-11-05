@@ -39,6 +39,20 @@ export function columns(tasks: Task[], doneLimit = 20): Record<string, Task[]> {
   return out;
 }
 
+/**
+ * What an empty owner means when nobody owns the task by design (AO-0140): an open finding waits
+ * for the person's triage, and an idea is parked. Null when the task has an owner or should have
+ * one, so an empty owner there reads as stuck.
+ */
+export function ownerlessLabel(t: Pick<Task, 'type' | 'status' | 'owner'>): string | null {
+  if (t.owner) return null;
+  if (t.type === 'finding' && t.status !== 'done' && t.status !== 'parked') {
+    return 'Waiting for your triage';
+  }
+  if (t.type === 'idea') return 'Parked idea';
+  return null;
+}
+
 /** `5m`, `3h`, `2d` ago (or ahead, for leases and deadlines). */
 /** Why each task waits, by `root/id`: reviews and claims, not inbox-only runs or ready ones. */
 export function waitReasons(

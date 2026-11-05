@@ -3,6 +3,20 @@
 What changed in each release, for people who use the app. Every change, including the small
 ones, is in [CHANGELOG.md](CHANGELOG.md).
 
+## v0.2.0-beta.2 (2026-11-05)
+
+- **Repeating tasks.** Set a task to come back daily, weekly, on chosen weekdays, monthly or
+  yearly, or whenever another task or a set of subtasks closes. Manage them in the new
+  **Repeating** view or with `ops repeat`. A repeat waits while its last task is still open, and
+  a slot missed while the PC was off fires once.
+- **Work without an owner finds one.** A finding you accept, or a task whose owner isn't a
+  configured agent, goes to the right role (engineer, QA, reviewer or PM) within a tick, so it
+  starts without you assigning it. `ops new` and `ops assign` refuse an owner no agent answers to.
+- **Triage from the task panel.** An open idea or finding shows **Make task**, **Bug** and
+  **Park** right in the panel, with an owner and a priority.
+- **Back and Forward in the task panel.** Follow a task link, then go back with the panel's
+  **Back**, Alt+Left or the mouse back button.
+
 ## v0.2.0-beta.1 (2026-11-05)
 
 The first installable Agent Ops.

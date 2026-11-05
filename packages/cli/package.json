@@ -1,6 +1,6 @@
 {
   "name": "@agent-ops/cli",
-  "version": "0.2.0-beta.1",
+  "version": "0.2.0-beta.2",
   "private": true,
   "description": "The ops command",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "ops": "dist/main.js"
   },
   "dependencies": {
-    "@agent-ops/core": "0.2.0-beta.1",
-    "@agent-ops/supervisor": "0.2.0-beta.1"
+    "@agent-ops/core": "0.2.0-beta.2",
+    "@agent-ops/supervisor": "0.2.0-beta.2"
   }
 }

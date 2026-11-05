@@ -68,22 +68,22 @@ Two rules need the clock or other tasks, and `ops` applies them when it reads:
 
 ### Notes, inbox and housekeeping
 
-| Command                                                        | Effect                                                                                                                                                                                                                                                                                                                                                                        |
-| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `comment ID MSG [--to ID]`                                     | A note; `--to` puts it in that inbox.                                                                                                                                                                                                                                                                                                                                         |
-| `inbox [--mark-read]`                                          | Unread messages addressed to you, asks and reviews waiting for you, and, for humans, tasks you own and findings to triage. A review item shows the latest request: who asked, its text, and the PR, commit and branch it names. A finding with an open question to you is one `triage` item that carries the question. `--mark-read` clears messages only.                    |
-| `new TITLE [...]`                                              | Creates a task. A human or the orchestrator creates it as asked. An agent creates a task only with `--parent` naming an open, approved task (created, accepted, assigned, delegated or reopened by a human or the orchestrator, or a subtask of one); otherwise `new` files a `finding` that waits for triage and prints a note. Ideas, findings and questions pass as filed. |
-| `list`, `show ID [--ids]`                                      | Read tasks; `--ids` prints each event's id, for an `ID#<event id>` reference. `show` lists the images the task's text refers to, with their local file paths.                                                                                                                                                                                                                 |
-| `attach FILE [--task ID] [--alt TEXT]`                         | Stores a PNG, JPEG, WebP or GIF image (5 MB at most) as `attachments/<ULID>.<ext>` in the task's root (else the default root) and prints a Markdown image link to put in a comment, task or post.                                                                                                                                                                             |
-| `retype ID TYPE [MSG] [--to OWNER] [--answer TEXT]`            | Changes the task type, for example a finding accepted as `bug` or set aside as `idea` (human or orchestrator); `--to` also assigns it and `--answer` answers its open question, in the same write. Written as a `retype` event; `task.md` keeps the type it was filed with.                                                                                                   |
-| `assign ID TO`, `priority ID P`, `park ID MSG`, `reopen ID`    | Housekeeping.                                                                                                                                                                                                                                                                                                                                                                 |
-| `sync [--pull] [--push] [--auto] [--session-end]`              | Commits the root, then pulls and pushes.                                                                                                                                                                                                                                                                                                                                      |
-| `leaks PATH...`                                                | Scans files for keys, tokens and webhook URLs.                                                                                                                                                                                                                                                                                                                                |
-| `doctor [--json]`                                              | Checks this machine: user config, data roots and their upstreams, the opsd config, each runtime on PATH and signed in (sign-in files are checked for, never read), opsd and its build, free memory and disk. Exit 1 when a check fails.                                                                                                                                       |
-| `report [--days N] [--from DATE [--to DATE]] [--post CHANNEL]` | Tasks opened and closed per project, runs and tokens per agent and provider, decisions, over the last N whole days (default 7) or a date range; `--post` sends the summary to a channel, for example from a weekly schedule.                                                                                                                                                  |
-| `master [PATH] [--off]`                                        | Prints, sets or clears the Agent Ops Master Repo in the user config.                                                                                                                                                                                                                                                                                                          |
-| `mirror on [--root NAME]`, `mirror off`                        | Mirrors this project root into the Master Repo, or stops (`mirror:` in its `config.yml`).                                                                                                                                                                                                                                                                                     |
-| `archive [--days N] [--dry-run]`                               | Moves done and parked tasks untouched for N days (default 30) to `archive/tasks/`. Human or orchestrator. `list --all`, `show` and dependency checks still find them; `reopen` moves a task back.                                                                                                                                                                             |
+| Command                                                            | Effect                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `comment ID MSG [--to ID]`                                         | A note; `--to` puts it in that inbox.                                                                                                                                                                                                                                                                                                                                         |
+| `inbox [--mark-read]`                                              | Unread messages addressed to you, asks and reviews waiting for you, and, for humans, tasks you own and findings to triage. A review item shows the latest request: who asked, its text, and the PR, commit and branch it names. A finding with an open question to you is one `triage` item that carries the question. `--mark-read` clears messages only.                    |
+| `new TITLE [...]`                                                  | Creates a task. A human or the orchestrator creates it as asked. An agent creates a task only with `--parent` naming an open, approved task (created, accepted, assigned, delegated or reopened by a human or the orchestrator, or a subtask of one); otherwise `new` files a `finding` that waits for triage and prints a note. Ideas, findings and questions pass as filed. |
+| `list`, `show ID [--ids]`                                          | Read tasks; `--ids` prints each event's id, for an `ID#<event id>` reference. `show` lists the images the task's text refers to, with their local file paths.                                                                                                                                                                                                                 |
+| `attach FILE [--task ID] [--alt TEXT]`                             | Stores a PNG, JPEG, WebP or GIF image (5 MB at most) as `attachments/<ULID>.<ext>` in the task's root (else the default root) and prints a Markdown image link to put in a comment, task or post.                                                                                                                                                                             |
+| `retype ID TYPE [MSG] [--to OWNER] [--priority P] [--answer TEXT]` | Changes the task type, for example a finding accepted as `bug` or set aside as `idea` (human or orchestrator); `--to` also assigns it, `--priority` sets its priority and `--answer` answers its open question, in the same write. Written as a `retype` event; `task.md` keeps the type it was filed with.                                                                   |
+| `assign ID TO`, `priority ID P`, `park ID MSG`, `reopen ID`        | Housekeeping.                                                                                                                                                                                                                                                                                                                                                                 |
+| `sync [--pull] [--push] [--auto] [--session-end]`                  | Commits the root, then pulls and pushes.                                                                                                                                                                                                                                                                                                                                      |
+| `leaks PATH...`                                                    | Scans files for keys, tokens and webhook URLs.                                                                                                                                                                                                                                                                                                                                |
+| `doctor [--json]`                                                  | Checks this machine: user config, data roots and their upstreams, the opsd config, each runtime on PATH and signed in (sign-in files are checked for, never read), opsd and its build, free memory and disk. Exit 1 when a check fails.                                                                                                                                       |
+| `report [--days N] [--from DATE [--to DATE]] [--post CHANNEL]`     | Tasks opened and closed per project, runs and tokens per agent and provider, decisions, over the last N whole days (default 7) or a date range; `--post` sends the summary to a channel, for example from a weekly schedule.                                                                                                                                                  |
+| `master [PATH] [--off]`                                            | Prints, sets or clears the Agent Ops Master Repo in the user config.                                                                                                                                                                                                                                                                                                          |
+| `mirror on [--root NAME]`, `mirror off`                            | Mirrors this project root into the Master Repo, or stops (`mirror:` in its `config.yml`).                                                                                                                                                                                                                                                                                     |
+| `archive [--days N] [--dry-run]`                                   | Moves done and parked tasks untouched for N days (default 30) to `archive/tasks/`. Human or orchestrator. `list --all`, `show` and dependency checks still find them; `reopen` moves a task back.                                                                                                                                                                             |
 
 ### Findings and the KB
 
@@ -112,6 +112,49 @@ after its deadline. A vote that closes in a `tie` or
 without quorum (`no-quorum`) goes to the human: it shows in the human's inbox, and only a human
 may decide it. A human may decide any vote at any time. Listed voters who have not voted see the
 vote in their inbox.
+
+### Repeating tasks
+
+A repeat is a task template in `repeats/<name>.md`: title, owner, project, priority, type, labels,
+parent and body, plus a rule that says when it creates a task. Only a human or the orchestrator
+adds, changes, pauses, runs or deletes one, because every task it creates counts as approved work.
+
+| Command                                                                                                                                    | Effect                                                                                                                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `repeat add NAME --title T --start "2026-11-05 09:00" [--every once\|daily\|weekly\|weekdays\|monthly\|yearly] [--days mon,thu]`           | A time rule. The start is local wall time; `once` is the default. `weekdays` needs `--days`.                                 |
+| `repeat add NAME --title T --when "closed ID"` or `--when "children-closed ID"` `[--start ...]`                                            | A condition: the task is done or parked, or the task has subtasks and all of them are. `--start` sets the earliest firing.   |
+| Options for both: `[--until DATE] [--count N] [--owner ID] [--project P] [--priority P] [--type T] [--label L]... [--parent ID] [-m BODY]` | `--until` is the last local date a slot may fall on; `--count` caps the tasks it creates. `{date}` in the title is the slot. |
+| `repeat edit NAME [same options]`                                                                                                          | Changes the given fields; a condition replaces the time rule and the other way round.                                        |
+| `repeat list`, `repeat show NAME`                                                                                                          | State (`active`, `waiting`, `paused`, `finished`, `broken`), the rule in words, the next slot, tasks created, the last one.  |
+| `repeat pause NAME`, `repeat resume NAME`, `repeat delete NAME`                                                                            | Pause keeps the repeat and creates nothing. Delete removes the template; the tasks it created stay.                          |
+| `repeat run NAME`                                                                                                                          | Creates its task now, paused or not. A time rule counts it as this minute's slot.                                            |
+| `repeat tick`                                                                                                                              | Creates the task of every due repeat. opsd does this each tick; run it by hand where no opsd runs.                           |
+
+How a repeat fires:
+
+- **Slots.** Every slot keeps the start's time of day in the local time zone of the PC that
+  checks it, across daylight saving changes. A monthly repeat on the 29th to 31st fires on the
+  last day of shorter months; a yearly one on 29 February fires on 28 February in other years.
+- **Missed slots fire once.** When the PC was off, opsd was paused or the repeat was paused, the
+  next check creates one task, for the latest slot it missed, not one per slot.
+- **One open task at a time.** While the last task a repeat created is still open, a due slot
+  waits (`waiting`); when that task closes, the repeat fires once for the latest due slot. No
+  work piles up and none is lost.
+- **Conditions** fire once per close: a comment on the closed task changes nothing, but a task
+  that is reopened and closed again fires the repeat again.
+- **Links.** Each task it creates has `repeat: <name>` and `repeat_slot: <slot>` in `task.md` and
+  a line in its body naming the repeat. Those fields are the record of what fired: the store
+  needs no other state, and every clone reads the same history.
+- **More than one root.** `ops repeat add` writes to the default root; `add ROOT/NAME` picks
+  another. Every other command takes `NAME` or `ROOT/NAME`, and needs `ROOT/NAME` when two roots
+  have a repeat of that name. An edit changes the repeat in the root it lives in. `ops repeat
+list` and the desktop cards show such a repeat as `ROOT/NAME`, the form the commands take.
+- **More than one PC.** Two PCs that both run opsd on one task store can fire the same slot
+  before they sync. Set `opsd.repeats: false` on all but one of them. A project root and its
+  Master Repo copy count as one store here.
+
+Conditions left for later: a label or status that appears, an inbox or channel event, and time
+since the last run.
 
 `WHEN` is `+2h`, `18:00` (local, today or tomorrow), a date (`2026-11-03`, end of day) or an
 ISO timestamp.
@@ -213,6 +256,32 @@ clears it). Types that change state:
 ignored, so older `ops` versions read newer data. opsd writes `merge` events, and the `changes`
 verdict that sends back approved work it could not merge, as `opsd:merge`.
 
+## Owners
+
+Every task that can run has an owner (AO-0140):
+
+- `ops new` and `ops assign` take a person, a configured agent, or a group (`*:engineer`,
+  `claude:*`) that a waking agent (`opsd.agents.<id>.wake: true`, role file active) answers to.
+  For a role group, that agent's provider must be one opsd starts the role's group work on:
+  listed in `opsd.roles.<role>.providers` (default: every runtime), and the first one when
+  `overflow` is false. When no agent wakes, a group needs a configured agent instead. Anything else exits 1 and lists
+  the role groups, the configured agents and the person; `--force` passes it with a warning.
+- Each tick, before it wakes agents, opsd gives an owner to open `todo` or `blocked` work, or to a
+  claim whose lease ran out, that has none, or whose owner reaches no configured agent: a finding
+  a person accepted, say, a task owned by `claude:release` when no such agent exists, or work an
+  agent claimed before it was removed. A live claim keeps its task. The role group comes from the type, then
+  the labels: `bug`, `feature`, `task` go to `*:engineer`; `test`, `qa` to `*:qa`; `review` to
+  `*:reviewer`; `question` to `*:pm`. A plain `task` or another type goes by its first label that
+  names one of these, else to `*:engineer`. opsd writes it as an `assign` event from `opsd:router`
+  with the reason, and only when a waking agent that wake would start on the task answers to the
+  group: one of the role's providers, as for `ops new`, whose role file allows the task's type
+  (`can_claim`; read-only roles take only questions without one), and not of the provider of the
+  reviewer a delegation expects, since the routing `assign` keeps the delegation.
+- Findings that wait for triage and ideas keep an empty owner on purpose. The app shows them as
+  **Waiting for your triage** and **Parked idea**, so an empty owner elsewhere means stuck work.
+- `ops waits` lists ownerless work opsd cannot route, and work owned by an id no agent answers
+  to, with the reason, such as `opsd cannot route it: no waking agent answers to *:qa`.
+
 ## Claims across machines
 
 On one machine, `ops` serializes writes to a task with a lock file, so two agents never both win a
@@ -304,6 +373,9 @@ Every session pushes when it ends or compacts its context, whatever the policy:
     junction; a root whose name is not one plain folder name is not mirrored.
   - `channels/`, `kb/` and `attachments/`: files one side lacks cross both ways. `config.yml` and `agents/` go from
     the project root to the copy only. Decisions are not mirrored yet.
+  - `repeats/`: an add, edit, pause or delete on either side reaches the other; when both sides
+    changed one repeat since the last mirror, the project root's version wins and `ops sync` says
+    so. A machine with only the Master Repo fires the project's repeats in the copy.
 - Same-role agents on different projects do not collide: opsd's role limits count per project,
   and each run works in the git top of its task's root. A task known only from the Master Repo
   gets no run until the machine has the project's checkout, or the agent has a `cwd` in the opsd

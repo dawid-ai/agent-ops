@@ -112,6 +112,52 @@ describe('Master Repo mirror', () => {
     expect(readFileSync(back.file)).toEqual(png(2));
   });
 
+  it('carries repeats both ways, with edits, pauses and deletes', () => {
+    const w = world();
+    const now = () => new Date(2026, 10, 3, 12).getTime();
+    w.m1('human:dawid').saveRepeat({
+      name: 'report',
+      title: 'Daily report',
+      start: '2026-11-01 09:00',
+      repeat: 'daily',
+    });
+    w.sync1();
+    w.sync2();
+    // A machine with only the Master Repo sees the repeat and fires it.
+    const ws2 = w.m2('human:dawid', now);
+    expect(ws2.repeats().map((r) => `${r.root}/${r.meta.name}`)).toEqual(['site/report']);
+    expect(ws2.fireRepeats().map((f) => `${f.root} ${f.slot}`)).toEqual(['site 2026-11-03T09:00']);
+
+    // A pause in the Master Repo reaches the project root.
+    w.m2('human:dawid').setRepeatPaused('site/report', true);
+    w.sync2();
+    w.sync1();
+    const ws1 = w.m1('human:dawid', now);
+    expect(ws1.repeatView('site/report').meta.paused).toBe(true);
+    // The task it fired came across too: the project root does not fire that slot again.
+    ws1.setRepeatPaused('site/report', false);
+    expect(ws1.fireRepeats()).toEqual([]);
+
+    // An edit in the project root reaches the Master Repo and is not undone by the old copy.
+    w.m1('human:dawid').saveRepeat(
+      { name: 'report', title: 'Daily report v2', start: '2026-11-01 09:00', repeat: 'daily' },
+      { replace: true },
+    );
+    w.sync1();
+    w.sync2();
+    expect(w.m2('human:dawid').repeatView('site/report').meta.title).toBe('Daily report v2');
+    expect(w.m1('human:dawid').repeatView('site/report').meta.title).toBe('Daily report v2');
+
+    // A delete on either side removes it on both.
+    w.m2('human:dawid').deleteRepeat('site/report');
+    w.sync2();
+    w.sync1();
+    expect(w.m1('human:dawid').repeats()).toEqual([]);
+    w.sync1();
+    w.sync2();
+    expect(w.m2('human:dawid').repeats()).toEqual([]);
+  });
+
   it('carries a claim made in the Master Repo back to the project root', () => {
     const w = world();
     w.m1('human:dawid').newTask({ title: 'pricing page', owner: '*:engineer' });

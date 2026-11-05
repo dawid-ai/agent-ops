@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ago, columns, readableLog, tokens, waitReasons } from '../ui/src/lib/format';
+import {
+  ago,
+  columns,
+  ownerlessLabel,
+  readableLog,
+  tokens,
+  waitReasons,
+} from '../ui/src/lib/format';
 import type { Task } from '../ui/src/types';
 
 function task(id: string, over: Partial<Task> = {}): Task {
@@ -20,6 +27,18 @@ function task(id: string, over: Partial<Task> = {}): Task {
     ...over,
   };
 }
+
+describe('ownerless label (AO-0140)', () => {
+  it('tells nobody-owns-it-by-design from stuck', () => {
+    expect(ownerlessLabel(task('T-1', { type: 'finding' }))).toBe('Waiting for your triage');
+    expect(ownerlessLabel(task('T-2', { type: 'idea' }))).toBe('Parked idea');
+    expect(ownerlessLabel(task('T-3', { type: 'idea', status: 'parked' }))).toBe('Parked idea');
+    // A closed finding, owned work and ownerless work show their owner, or none.
+    expect(ownerlessLabel(task('T-4', { type: 'finding', status: 'parked' }))).toBeNull();
+    expect(ownerlessLabel(task('T-5', { type: 'finding', owner: 'claude:qa' }))).toBeNull();
+    expect(ownerlessLabel(task('T-6'))).toBeNull();
+  });
+});
 
 describe('board columns', () => {
   it('groups by status, orders by priority, and shows claimable tasks as to do', () => {

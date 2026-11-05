@@ -2,7 +2,14 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { createServer } from 'node:http';
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { sep } from 'node:path';
-import type { AgentDef, Priority, RoleInput, TaskView, Workspace } from '@agent-ops/core';
+import type {
+  AgentDef,
+  Priority,
+  RepeatInput,
+  RoleInput,
+  TaskView,
+  Workspace,
+} from '@agent-ops/core';
 import {
   findAttachment,
   MAX_ATTACHMENT_BYTES,
@@ -193,6 +200,28 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
         return send(res, 200, schedulesView(sup));
       }
     }
+    if (area === 'repeats') {
+      // Repeats create approved work, so only the human manages them (AO-0142).
+      if (method === 'GET' && !id) return send(res, 200, wsAs().repeats());
+      if (method === 'GET' && id) return send(res, 200, wsAs().repeatView(id));
+      if (method === 'POST') humanOnly('managing repeats');
+      if (method === 'POST' && !id) {
+        const ws = wsAs();
+        ws.saveRepeat(repeatInput(body), { replace: body.replace === true });
+        return send(res, 200, ws.repeats());
+      }
+      if (method === 'POST' && id && (action === 'pause' || action === 'resume')) {
+        return send(res, 200, wsAs().setRepeatPaused(id, action === 'pause'));
+      }
+      if (method === 'POST' && id && action === 'run') {
+        return send(res, 201, wsAs().runRepeat(id));
+      }
+      if (method === 'POST' && id && action === 'delete') {
+        const ws = wsAs();
+        ws.deleteRepeat(id);
+        return send(res, 200, ws.repeats());
+      }
+    }
     if (method === 'GET' && area === 'standup') {
       return send(res, 200, standup(sup, Number(q.get('hours') ?? 24)));
     }
@@ -368,6 +397,7 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
               return ws.retype(ref, need(body.type, 'type'), msg, {
                 to: str(body.to) || undefined,
                 answer: str(body.answer) || undefined,
+                priority: (str(body.priority) || undefined) as Priority | undefined,
               });
             case 'verdict': {
               humanOnly('a verdict');
@@ -607,6 +637,46 @@ function str(v: unknown): string | undefined {
 function need(v: unknown, name: string): string {
   if (typeof v !== 'string' || !v) throw new HttpError(400, `missing ${name}`);
   return v;
+}
+
+/** A repeat from a request body; text fields only, `labels` and `days` as lists or text. */
+function repeatInput(body: Json): RepeatInput {
+  const list = (v: unknown, name: string): string[] | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    if (typeof v === 'string')
+      return v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v as string[];
+    throw new HttpError(400, `${name}: use a list of text`);
+  };
+  const count = body.count;
+  if (count !== undefined && count !== null && count !== '' && typeof count !== 'number') {
+    throw new HttpError(400, 'count: use a number');
+  }
+  if (body.paused !== undefined && typeof body.paused !== 'boolean') {
+    throw new HttpError(400, 'paused: use true or false');
+  }
+  return {
+    name: need(body.name, 'name'),
+    root: str(body.root),
+    title: need(body.title, 'title'),
+    body: str(body.body),
+    type: str(body.type),
+    priority: str(body.priority) as Priority | undefined,
+    owner: str(body.owner),
+    project: str(body.project),
+    parent: str(body.parent),
+    labels: list(body.labels, 'labels'),
+    start: str(body.start),
+    repeat: str(body.repeat),
+    days: list(body.days, 'days'),
+    until: str(body.until),
+    count: typeof count === 'number' ? count : undefined,
+    when: str(body.when),
+    paused: body.paused as boolean | undefined,
+  };
 }
 
 /** Accepts a full run id or a unique prefix or suffix of one. */

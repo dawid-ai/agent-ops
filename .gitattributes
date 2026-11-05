@@ -9,3 +9,6 @@
 .agent-ops/** export-ignore
 .agent-ops export-ignore
 docs/proposals/** export-ignore
+# Launch post drafts: Dawid edits and posts them by hand; they never ship in the export.
+docs/launch/** export-ignore
+.claude/skills/release/** export-ignore

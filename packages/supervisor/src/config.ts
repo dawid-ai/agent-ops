@@ -183,6 +183,11 @@ export interface OpsdConfig {
   runtimes: Record<string, RuntimeConfig>;
   agents: Record<string, AgentRunConfig>;
   schedules: ScheduleConfig[];
+  /**
+   * Create tasks from the roots' repeats (`repeats/*.md`) each tick. On by default; set it to
+   * false on every PC but one that shares a task store, so two PCs never fire the same slot.
+   */
+  repeats: boolean;
   /** Webhook notifications for the human; the URL is a secret and stays in the user config. */
   notify: NotifyConfig;
   chat: ChatConfig;
@@ -274,6 +279,7 @@ export function opsdConfig(user: UserConfig & { opsd?: Partial<OpsdConfig> }): O
     // `claude:qa:` with nothing after it names the agent with no settings of its own.
     agents: Object.fromEntries(Object.entries(raw.agents ?? {}).map(([id, a]) => [id, a ?? {}])),
     schedules: raw.schedules ?? [],
+    repeats: raw.repeats ?? true,
     notify: checkNotify((raw as { notify?: unknown }).notify),
     chat: {
       agent: raw.chat?.agent ?? DEFAULT_CHAT_AGENT,
@@ -295,6 +301,7 @@ export function opsdConfig(user: UserConfig & { opsd?: Partial<OpsdConfig> }): O
   };
   count(cfg.max_runs, 'max_runs', 0);
   if (typeof cfg.paused !== 'boolean') throw new OpsError('opsd.paused: use true or false', 2);
+  if (typeof cfg.repeats !== 'boolean') throw new OpsError('opsd.repeats: use true or false', 2);
   amount(cfg.min_free_gb, 'min_free_gb');
   amount(cfg.tick_seconds, 'tick_seconds');
   amount(cfg.proc_seconds, 'proc_seconds');

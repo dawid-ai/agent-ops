@@ -15,6 +15,7 @@ import {
   ReplyReader,
   Supervisor,
 } from '../src/index.js';
+import { killOwn } from './own-procs.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoTop = join(here, '..', '..', '..');
@@ -40,20 +41,23 @@ afterEach(async () => {
   }
   // A fake agent that outlives its run holds the temp folders open on Windows: where opsd cannot
   // list processes, as in a sandbox, it stops only the hidden shell, not the launcher and the
-  // fake. Each fake wrote its PIDs; wait for them to exit, then stop them through those PIDs.
-  const pids = pidFiles
-    .splice(0)
-    .flatMap((f) => readFileSync(f, 'utf8').split('\n').filter(Boolean).map(Number));
-  const left: number[] = [];
-  for (const pid of pids) if (!(await gone(pid, 2_000))) left.push(pid);
-  for (const pid of left) {
-    try {
-      process.kill(pid);
-    } catch {
-      // Exited between the check and the kill.
-    }
-  }
-  for (const pid of left) {
+  // fake. Each fake wrote its PIDs and the time it ran; wait for them to exit, then stop the ones
+  // that still run the fake's processes. Most have exited long ago, and Windows may have given
+  // their PIDs to other processes, such as a vitest worker, which a bare kill would end (AO-0145).
+  const pids = pidFiles.splice(0).flatMap((f) =>
+    readFileSync(f, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [pid, at] = line.split(' ').map(Number);
+        return { pid: pid!, at: at! };
+      }),
+  );
+  const left: typeof pids = [];
+  for (const p of pids) if (!(await gone(p.pid, 2_000))) left.push(p);
+  const killed: number[] = [];
+  for (const p of left) if (await killOwn(p.pid, p.at)) killed.push(p.pid);
+  for (const pid of killed) {
     if (!(await gone(pid, 5_000))) throw new Error(`fake agent ${pid} did not exit`);
   }
   for (const d of dirs.splice(0)) await remove(d);
@@ -110,8 +114,10 @@ function temp(): string {
 const FAKE_CHAT = `
 const fs = await import('node:fs');
 // Windows: the parent is opsd's launcher, which outlives opsd by design. Unix: the test itself.
+// Each with a time both ran, so cleanup can tell them from later processes that reuse the PIDs.
 const pids = process.platform === 'win32' ? [process.pid, process.ppid] : [process.pid];
-fs.appendFileSync(process.env.FAKE_PIDS, pids.join('\\n') + '\\n');
+const at = Date.now();
+fs.appendFileSync(process.env.FAKE_PIDS, pids.map((p) => p + ' ' + at).join('\\n') + '\\n');
 const { Workspace } = await import(${JSON.stringify(pathToFileURL(coreDist).href)});
 let prompt = '';
 for await (const c of process.stdin) prompt += c;

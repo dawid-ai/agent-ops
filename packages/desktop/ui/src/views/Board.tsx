@@ -24,7 +24,7 @@ import {
   matchesFilter,
   setBoardShowsIdeas,
 } from '../lib/filters';
-import { ago, columns, COLUMNS, waitReasons } from '../lib/format';
+import { ago, columns, COLUMNS, ownerlessLabel, waitReasons } from '../lib/format';
 import { dueLabel, identity, priorityInfo, statusInfo } from '../lib/identity';
 import { moveTo } from '../lib/transitions';
 import type { RunRecord, Status, Task, WaitItem } from '../types';
@@ -379,7 +379,7 @@ function Card(props: {
             </span>
           </span>
         ) : (
-          <span className="text-[11px] text-fg-4">unassigned</span>
+          <span className="text-[11px] text-fg-4">{ownerlessLabel(t) ?? 'unassigned'}</span>
         )}
         {due && !closed && (
           <span

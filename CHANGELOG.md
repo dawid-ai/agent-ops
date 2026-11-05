@@ -6,6 +6,22 @@ people who use the app are in [UPDATES.md](UPDATES.md); this file lists every ch
 Unreleased changes are in [`changelog.d/`](changelog.d/README.md). `scripts/fold-changelog.mjs` folds
 them in at release time (see [RELEASING.md](RELEASING.md)).
 
+## 0.2.0-beta.2 (2026-11-05)
+
+### Added
+
+- The task panel shows the triage actions. An open idea gets **Make task**, **Bug** and **Park**, with an owner and a priority. An open finding gets the same actions as **Findings** and the **Inbox**, so accepting it in the panel clears it there too.
+- `ops retype --priority P` and the `priority` field of `POST /api/tasks/:ref/retype` set the priority in the same write as the new type.
+- Repeating tasks: a template in the task store (`repeats/<name>.md`) that creates a task at a local date and time, then daily, weekly, on chosen weekdays (such as Mon and Thu), monthly or yearly, with an optional end date or count; or when a task, or all subtasks of a parent, close. opsd creates the tasks each tick. Slots missed while the PC was off or opsd was paused fire once, and a repeat waits while the last task it created is still open. Manage them with `ops repeat` (add, edit, list, show, pause, resume, delete, run, tick), `/api/repeats` and the desktop **Repeating** view. Set `opsd.repeats: false` on all but one PC that shares a task store. Repeats mirror into the Master Repo both ways, and `ROOT/NAME` picks one when two roots use the same name; `ops repeat list` and the desktop show those repeats as `ROOT/NAME`.
+- The task panel has **Back** and **Forward**. After you follow a task link inside an open task or a message, **Back** in the panel header returns to the task you came from. Alt+Left, Alt+Right and the mouse back and forward buttons do the same. Closing the panel clears the history.
+
+### Changed
+
+- opsd gives ownerless work an owner each tick: an accepted finding, a task whose owner is no configured agent, or a claim of a removed agent once its lease runs out, goes to a role group picked from its type and labels (`bug`, `feature` and `task` to `*:engineer`, `test` and `qa` to `*:qa`, `review` to `*:reviewer`, `question` to `*:pm`), recorded as an `assign` from `opsd:router` with the reason. opsd routes only to a group with a waking agent it would start on the task: one of the role's providers (`opsd.roles.<role>.providers`, `overflow`) whose role file allows the task's type and that is not of the provider of the reviewer a delegation expects. Accepting a finding in the app now starts a run within one tick without a manual assign.
+- `ops new` and `ops assign` refuse a role group that no waking agent of the role's providers answers to, and list the role groups, configured agents and person that take work instead. `--force` still passes it.
+- The app shows **Waiting for your triage** for an open finding and **Parked idea** for an idea instead of an empty owner.
+- `ops waits` lists ownerless work opsd cannot route, with the reason.
+
 ## 0.2.0-beta.1 (2026-11-05)
 
 ### Added

@@ -72,6 +72,36 @@ describe('inbox triage items', () => {
     expect(h.inbox()).toEqual([]);
   });
 
+  it('turns an idea into a task with an owner and a priority in one write (AO-0144)', () => {
+    const { as } = setup();
+    const h = as('human:dawid');
+    h.newTask({ title: 'Dark mode', type: 'idea' });
+    const res = h.retype('1', 'task', 'Made a task from the idea', {
+      to: 'claude:engineer',
+      priority: 'p1',
+    });
+    expect(res.events.map((e) => e.type)).toEqual(['retype', 'priority', 'assign']);
+    expect(res.view).toMatchObject({
+      status: 'todo',
+      owner: 'claude:engineer',
+      meta: expect.objectContaining({ type: 'task', priority: 'p1' }),
+    });
+    expect(
+      as('claude:engineer')
+        .queue()
+        .map((v) => v.meta.id),
+    ).toEqual(['T-0001']);
+  });
+
+  it('leaves out an unchanged priority and refuses a bad one', () => {
+    const { as } = setup();
+    const h = as('human:dawid');
+    h.newTask({ title: 'Dark mode', type: 'idea', priority: 'p2' });
+    expect(() => h.retype('1', 'task', '', { priority: 'p9' as never })).toThrow(/bad priority/);
+    const res = h.retype('1', 'bug', '', { priority: 'p2' });
+    expect(res.events.map((e) => e.type)).toEqual(['retype']);
+  });
+
   it('accepts without an answer and keeps the question as an ask item until answered', () => {
     const { as } = setup();
     const h = as('human:dawid');

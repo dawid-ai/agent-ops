@@ -16,6 +16,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -335,6 +336,57 @@ function unionDir(p: Side, m: Side, rel: string): void {
   }
 }
 
+const REPEAT_FILE = /^[a-z0-9][a-z0-9-]{0,59}\.md$/;
+
+/**
+ * Keeps repeats/ in step both ways. Repeats are edited, paused and deleted, so a copy-if-missing
+ * union would undo those: each file merges against the version both sides last agreed on (kept
+ * in `base`, name to hash). A change or a delete on one side wins; when both sides changed the
+ * same file, the project's version wins and a note says so.
+ */
+function mirrorRepeats(p: Side, m: Side, base: Record<string, string>, notes: string[]): void {
+  const dirOf = (s: Side): string => join(s.root.dir, 'repeats');
+  const read = (s: Side, n: string): string | null => {
+    const f = join(dirOf(s), n);
+    return plainFile(f) ? hash(readFileSync(f, 'utf8')) : null;
+  };
+  const put = (from: Side, to: Side, n: string): void =>
+    copyIn(to, join(dirOf(from), n), join(dirOf(to), n), false);
+  const drop = (s: Side, n: string): void => {
+    const f = join(dirOf(s), n);
+    writable(f);
+    rmSync(f, { force: true });
+    s.copied++;
+  };
+  const names = new Set([...files(dirOf(p)), ...files(dirOf(m)), ...Object.keys(base)]);
+  for (const n of [...names].sort()) {
+    if (!REPEAT_FILE.test(n)) continue;
+    const ph = read(p, n);
+    const mh = read(m, n);
+    const bh = base[n] ?? null;
+    if (ph === mh) {
+      // Same on both sides, or gone from both.
+    } else if (mh === bh) {
+      if (ph === null) drop(m, n);
+      else put(p, m, n);
+    } else if (ph === bh) {
+      if (mh === null) drop(p, n);
+      else put(m, p, n);
+    } else if (ph === null) {
+      // Deleted in the project, changed in the copy: keep the change.
+      put(m, p, n);
+    } else {
+      if (mh !== null) {
+        notes.push(`repeats/${n}: changed on both sides; the project's version wins`);
+      }
+      put(p, m, n);
+    }
+    const now = read(p, n);
+    if (now === null) delete base[n];
+    else base[n] = now;
+  }
+}
+
 /** Copies plain files from the project to the copy when missing or different. */
 function oneWay(p: Side, m: Side, rel: string): void {
   const src = join(p.root.dir, rel);
@@ -352,8 +404,8 @@ function oneWay(p: Side, m: Side, rel: string): void {
 }
 
 /**
- * Keeps a project root and its copy in the Master Repo in step: tasks both ways, channels and
- * learn notes both ways, config.yml and agents/ from the project only. Creates the copy on
+ * Keeps a project root and its copy in the Master Repo in step: tasks, channels, learn notes and
+ * repeats both ways, config.yml and agents/ from the project only. Creates the copy on
  * first use. Run between pull and push of both repos; commits come from their next sync.
  */
 export function mirrorPair(project: Root, master: Root, opts: { now?: number } = {}): MirrorResult {
@@ -447,6 +499,16 @@ function mirrorFenced(project: Root, master: Root, dir: string, now: number): Mi
   unionDir(p, m, 'channels');
   unionDir(p, m, 'kb');
   unionDir(p, m, 'attachments');
+
+  const repeatBaseFile = join(project.opsDir, 'mirror-repeats.json');
+  let repeatBase: Record<string, string> = {};
+  try {
+    repeatBase = JSON.parse(readFileSync(repeatBaseFile, 'utf8')) as Record<string, string>;
+  } catch {
+    // First mirror of repeats on this machine.
+  }
+  mirrorRepeats(p, m, repeatBase, notes);
+  project.writeAtomic(repeatBaseFile, JSON.stringify(repeatBase));
 
   for (const s of [p, m]) {
     if (s.keptChanged) writeMirrored(s.owner, s.kept);

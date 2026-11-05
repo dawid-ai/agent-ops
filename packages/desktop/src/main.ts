@@ -707,7 +707,7 @@ async function createWindow(): Promise<void> {
 async function screenshots(dir: string): Promise<void> {
   const views = (
     process.env.AGENT_OPS_VIEWS ??
-    'inbox,board,list,findings,activity,reports,agents,runs,standups,schedules,decisions,chat,channels,knowledge,settings'
+    'inbox,board,list,findings,activity,reports,agents,runs,standups,schedules,repeating,decisions,chat,channels,knowledge,settings'
   ).split(',');
   mkdirSync(dir, { recursive: true });
   // Views call opsd as soon as they show: wait until the app has started it, which takes

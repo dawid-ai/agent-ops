@@ -11,6 +11,7 @@ export * from './init.js';
 export * from './kb.js';
 export * from './lock.js';
 export * from './model.js';
+export * from './repeats.js';
 export * from './root.js';
 export * from './search.js';
 export * from './search-index.js';

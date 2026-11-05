@@ -1,6 +1,8 @@
 import type { LucideIcon } from 'lucide-react';
 import {
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ArrowRightLeft,
   Bot,
   CalendarClock,
@@ -13,6 +15,7 @@ import {
   GitPullRequestArrow,
   Hand,
   History,
+  ListChecks,
   MessageCircleQuestion,
   MessageSquare,
   Play,
@@ -35,7 +38,7 @@ import {
   Who,
   cx,
 } from '../components';
-import { ago, minutes, tokens } from '../lib/format';
+import { ago, minutes, ownerlessLabel, tokens } from '../lib/format';
 import {
   dueLabel,
   identity,
@@ -53,20 +56,30 @@ import type { Due } from '../ui/pickers';
 import { AgentPicker, DuePicker, dueToApi, MentionArea, Menu, useDirectory } from '../ui/pickers';
 import type { TaskFocus } from '../ui/refs';
 import { RefText } from '../ui/refs';
+import { TriageActions, waitsOn } from '../ui/triage';
 
 type Panel = 'delegate' | 'launch' | null;
+
+/** Types that wait for a person to turn them into work, with the shared triage actions. */
+const TRIAGED = new Set(['finding', 'idea']);
 
 export function TaskPanel({
   id,
   focus,
   nav,
   onClose,
+  onBack,
+  onForward,
 }: {
   id: string;
   /** An event to scroll to and highlight, from an `AO-0014#<event id>` reference. */
   focus?: TaskFocus;
   nav: Nav;
   onClose: () => void;
+  /** Returns to the task this one was opened from; no **Back** button without it. */
+  onBack?: () => void;
+  /** Returns to the task Back left; no **Forward** button without it. */
+  onForward?: () => void;
 }) {
   const { data, error, reload } = useData<TaskDetail>(`/api/tasks/${q(id)}`);
   const [panel, setPanel] = useState<Panel>(null);
@@ -112,6 +125,28 @@ export function TaskPanel({
       >
         <header className="border-b border-white/7 px-6 pt-4 pb-4">
           <div className="flex items-center gap-2">
+            {onBack && (
+              <button
+                type="button"
+                className="-ml-1 rounded-md p-1 text-fg-3 hover:bg-white/8 hover:text-fg"
+                onClick={onBack}
+                aria-label="Back"
+                title="Back (Alt+Left)"
+              >
+                <ArrowLeft size={16} />
+              </button>
+            )}
+            {onForward && (
+              <button
+                type="button"
+                className={`${onBack ? '' : '-ml-1 '}rounded-md p-1 text-fg-3 hover:bg-white/8 hover:text-fg`}
+                onClick={onForward}
+                aria-label="Forward"
+                title="Forward (Alt+Right)"
+              >
+                <ArrowRight size={16} />
+              </button>
+            )}
             <span className="font-mono text-xs text-fg-4">
               {t?.root}/{t?.id ?? id}
             </span>
@@ -242,6 +277,27 @@ export function TaskPanel({
                   Next: <RefText text={t.checkpoint.next} />
                 </div>
               )}
+            </div>
+          )}
+
+          {open && t && TRIAGED.has(t.type) && (
+            <div className="mt-4 rounded-xl border border-warn/20 bg-warn/[0.04] p-3">
+              <div className="label-caps mb-2 !text-warn">
+                {t.type === 'idea' ? 'Turn this idea into work' : 'Finding to triage'}
+              </div>
+              <TriageActions
+                key={`${t.root}/${t.id}/${t.type}`}
+                task={`${t.root}/${t.id}`}
+                type={t.type}
+                owner={t.owner}
+                priority={t.priority}
+                question={t.question && waitsOn(t.waitingOn, nav.me) ? t.question : undefined}
+                me={nav.me}
+                onDone={() => {
+                  reload();
+                  follow.toEnd();
+                }}
+              />
             </div>
           )}
 
@@ -414,7 +470,11 @@ function OwnerField({ t, nav, id }: { t: Task; nav: Nav; id: string }) {
   if (!editing) {
     return (
       <div className="flex items-center gap-2">
-        <Who id={t.owner} label />
+        {ownerlessLabel(t) ? (
+          <span className="text-xs text-fg-4">{ownerlessLabel(t)}</span>
+        ) : (
+          <Who id={t.owner} label />
+        )}
         {!['done', 'parked'].includes(t.status) && (
           <button className="text-xs text-fg-4 hover:text-signal" onClick={() => setEditing(true)}>
             change
@@ -465,6 +525,7 @@ const EVENT_STYLE: Record<string, { icon: LucideIcon; color: string; label?: str
   block: { icon: CircleDot, color: '#ffb547' },
   ask: { icon: MessageCircleQuestion, color: '#ffb547', label: 'asked' },
   answer: { icon: Reply, color: '#3ddc97', label: 'answered' },
+  retype: { icon: ListChecks, color: '#ffd166', label: 'changed the type' },
 };
 
 /**
@@ -579,7 +640,9 @@ function EventRow({
       ? `${e.reason && e.reason !== 'exit' ? e.reason : `exit ${e.exit ?? '-'}`}${e.minutes !== undefined ? `, ${minutes(e.minutes)}` : ''}${e.tokens ? `, ${tokens(e.tokens)} tokens` : ''}`
       : e.priority
         ? priorityInfo(e.priority).label
-        : (e.verdict ?? e.ref ?? (e.on ? `on ${e.on.join(', ')}` : ''));
+        : e.task_type
+          ? `to ${e.task_type}`
+          : (e.verdict ?? e.ref ?? (e.on ? `on ${e.on.join(', ')}` : ''));
   const quiet =
     ['renew', 'progress', 'run-start', 'run-end', 'claim'].includes(e.type) && !e.body.trim();
   const said = ['comment', 'review', 'ask', 'answer', 'verdict', 'delegate', 'handoff', 'block'];

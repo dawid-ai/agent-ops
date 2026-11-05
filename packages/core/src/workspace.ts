@@ -2,10 +2,25 @@ import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { ActivityItem, ActivityOptions, ActivityPage } from './activity.js';
 import { activityPage } from './activity.js';
-import type { AgentDef, AgentFileProblem, AgentFiles, RoleInput } from './agents.js';
+import type {
+  AgentDef,
+  AgentFileProblem,
+  AgentFiles,
+  GroupProviders,
+  RoleInput,
+} from './agents.js';
 import type { Attachment } from './attachments.js';
 import { attachmentRefs, findAttachment, saveAttachment } from './attachments.js';
-import { canClaimType, checkRole, readAgentFiles, roleInactive, writeAgent } from './agents.js';
+import {
+  canClaimType,
+  checkRole,
+  DEFAULT_PROVIDERS,
+  readAgentFiles,
+  roleGroupFor,
+  roleInactive,
+  takesGroupWork,
+  writeAgent,
+} from './agents.js';
 import type { ChannelInfo, ChannelMessage } from './channels.js';
 import {
   assertChannel,
@@ -41,6 +56,7 @@ import {
   OpsError,
   ownerMatches,
   parseTaskId,
+  roleOf,
   runtimeOf,
   isActorId,
   isWildcard,
@@ -52,6 +68,37 @@ import { parseQuery, runSearch, wantedKinds } from './search.js';
 import { searchBudget, searchSources } from './search-index.js';
 import type { OpsEvent, Priority, Status, TaskMeta, TaskView } from './model.js';
 import { OPEN_STATUSES, PRIORITIES } from './model.js';
+import type {
+  Condition,
+  FiredRepeat,
+  RepeatDef,
+  RepeatInput,
+  RepeatMeta,
+  RepeatRule,
+  RepeatTask,
+  RepeatView,
+} from './repeats.js';
+import {
+  archivedRepeatTasks,
+  assertRepeatName,
+  closesTask,
+  describeRule,
+  hasRepeat,
+  latestSlot,
+  listRepeatNames,
+  localStamp,
+  nextSlot,
+  normalizeStart,
+  parseCondition,
+  parseLocal,
+  parseWeekdays,
+  readRepeat,
+  readRepeatCache,
+  removeRepeat,
+  validateRule,
+  writeRepeat,
+  writeRepeatCache,
+} from './repeats.js';
 import { Root } from './root.js';
 import { secretKind } from './secrets.js';
 import type { SyncResult } from './sync.js';
@@ -134,6 +181,19 @@ export interface StrandedTask {
   who: string;
   /** Such as `owner claude:release is not a configured agent`. */
   reason: string;
+}
+
+/** Ownerless work and the role group opsd gives it (AO-0140); see `Workspace.routes`. */
+export interface Route {
+  view: TaskView;
+  /** The role group, such as `*:engineer`. */
+  to: string;
+  /** Why it needs an owner, such as `AO-0140 has no owner`. */
+  why: string;
+  /** The assign event's text: `why` and where opsd routes it. */
+  reason: string;
+  /** Why opsd cannot route it yet, such as `no waking agent answers to *:qa`. */
+  blocker?: string;
 }
 
 function withNotes(res: ActResult, notes: string[]): ActResult {
@@ -458,6 +518,176 @@ export class Workspace {
     return `${id} is not a configured agent`;
   }
 
+  /**
+   * Agents opsd starts runs for on its own: `opsd.agents.<id>.wake: true` in the user config,
+   * without a paused or proposed role file.
+   */
+  wakingAgents(): string[] {
+    const opsd = (this.user as { opsd?: { agents?: unknown } }).opsd;
+    const agents = opsd?.agents && typeof opsd.agents === 'object' ? opsd.agents : {};
+    return Object.entries(agents as Record<string, { wake?: unknown } | null>)
+      .filter(([id, c]) => isActorId(id) && !isHuman(id) && c?.wake === true)
+      .filter(([id]) => !roleInactive(this.agent(id)))
+      .map(([id]) => id)
+      .sort();
+  }
+
+  /**
+   * Why `ops new` and `ops assign` refuse `id` as an owner, or null (AO-0140): it must be a person,
+   * a configured agent, or a group (`*:engineer`, `claude:*`) that a waking agent answers to, so
+   * the work wakes a run. When no agent wakes, a group needs a configured agent instead, since
+   * agents then run by hand. Null for every id when no agent is defined (see `knownAgents`).
+   */
+  ownerRefusal(id: string): string | null {
+    if (isHuman(id) || !isWildcard(id)) return this.unreachable(id);
+    if (this.knownAgents().length === 0) return null;
+    const waking = this.wakingAgents();
+    if (waking.length === 0) {
+      return this.knownAgents().some((a) => ownerMatches(id, a))
+        ? null
+        : `${id} matches no configured agent`;
+    }
+    const matching = waking.filter((a) => ownerMatches(id, a));
+    if (matching.length === 0) return `${id} matches no waking agent`;
+    // opsd starts `*:<role>` work only on the role's providers (`opsd.roles.<role>.providers`,
+    // `overflow`); a provider group (`claude:*`) is not limited by them.
+    if (!id.startsWith('*:') || matching.some((a) => takesGroupWork(a, this.groupProviders(a)))) {
+      return null;
+    }
+    const role = roleOf(id);
+    return `${id} matches no waking agent of the role's providers (opsd.roles.${role}.providers, overflow)`;
+  }
+
+  /**
+   * Which providers take `*:<role>` work for the role of `agent`, from the user config's
+   * `opsd.roles.<role>`: `providers` (default: every runtime opsd knows) and `overflow` (default
+   * true). opsd passes the same from its parsed config (`roleLimits`).
+   */
+  groupProviders(agent: string): GroupProviders {
+    const opsd = (this.user as { opsd?: { roles?: unknown; runtimes?: unknown; seeded?: unknown } })
+      .opsd;
+    const roles = opsd?.roles && typeof opsd.roles === 'object' ? opsd.roles : {};
+    const r = (roles as Record<string, { providers?: unknown; overflow?: unknown } | null>)[
+      roleOf(agent)
+    ];
+    const listed =
+      Array.isArray(r?.providers) && r.providers.every((p) => typeof p === 'string')
+        ? (r.providers as string[])
+        : undefined;
+    const configured =
+      opsd?.runtimes && typeof opsd.runtimes === 'object' ? Object.keys(opsd.runtimes) : [];
+    // Before seeding, opsd fills in the default providers, as its `mergeRuntimes` does.
+    const runtimes =
+      opsd?.seeded !== undefined ? configured : [...new Set([...DEFAULT_PROVIDERS, ...configured])];
+    return {
+      providers: listed ?? runtimes,
+      overflow: typeof r?.overflow === 'boolean' ? r.overflow : true,
+    };
+  }
+
+  /**
+   * Owners that take work, for a refusal: role groups `ownerRefusal` accepts, configured agents,
+   * then the person. When agents wake, a group needs a waking agent that is one of the role's
+   * providers; only when no agent wakes do configured agents stand in, as in `ownerRefusal`.
+   */
+  ownerSuggestions(root: Root = this.defaultRoot()): string {
+    const waking = this.wakingAgents();
+    const takers =
+      waking.length > 0
+        ? waking.filter((a) => takesGroupWork(a, this.groupProviders(a)))
+        : this.knownAgents();
+    const groups = [...new Set(takers.map(roleOf))].sort().map((r) => `*:${r}`);
+    const human = root.config.human;
+    const parts = [
+      groups.length > 0 ? `a role group (${groups.join(', ')})` : '',
+      `a configured agent (${this.knownAgents().join(', ')})`,
+      human ? human : '',
+    ].filter(Boolean);
+    return `use ${parts.join(', or ')}`;
+  }
+
+  /**
+   * Work no agent owns (AO-0140): `todo` or `blocked` tasks, or claims whose lease ran out, not
+   * findings or ideas, whose
+   * owner is empty or reaches no configured agent. Each names the role group `roleGroupFor` its
+   * type and labels picks, and whether opsd may route it there: a waking agent answers to that
+   * group, is one of the role's providers (`takesGroupWork`), is not the provider of the reviewer
+   * a delegation expects, may claim the task's type, and for a question the group is not the
+   * asker's. These are the checks opsd's wake planner makes, so a
+   * routed task has an agent that starts it. opsd passes the agents its config wakes and its
+   * parsed role limits.
+   */
+  routes(
+    waking = this.wakingAgents(),
+    limits: (agent: string) => GroupProviders = (a) => this.groupProviders(a),
+  ): Route[] {
+    const out: Route[] = [];
+    for (const v of this.views()) {
+      const why = this.routeReason(v);
+      if (!why) continue;
+      const to = roleGroupFor(v.meta.type, v.meta.labels ?? []);
+      const role = roleOf(to);
+      const answering = waking.filter((a) => ownerMatches(to, a));
+      const providers = answering.filter((a) => takesGroupWork(a, limits(a)));
+      // A routing `assign` keeps the delegation, and opsd never wakes the provider of the
+      // reviewer the task expects.
+      const avoid = v.delegation?.review;
+      const eligible =
+        avoid && !isHuman(avoid)
+          ? providers.filter((a) => runtimeOf(a) !== runtimeOf(avoid))
+          : providers;
+      let blocker: string | undefined;
+      if (answering.length === 0) blocker = `no waking agent answers to ${to}`;
+      else if (providers.length === 0) {
+        blocker = `no waking agent of ${to} is one of its providers (opsd.roles.${role}.providers, overflow)`;
+      } else if (eligible.length === 0) {
+        blocker = `every waking provider of ${to} is the provider of the expected reviewer ${avoid}`;
+      } else if (!eligible.some((a) => canClaimType(this.agent(a), v.meta.type, a))) {
+        blocker = `no waking agent of ${to} may claim ${v.meta.type} work (can_claim)`;
+      } else if (v.meta.type === QUESTION_TYPE && ownerMatches(to, v.meta.created_by)) {
+        blocker = `${to} includes the asker ${v.meta.created_by}`;
+      }
+      out.push({
+        view: v,
+        to,
+        why,
+        reason: `${why}; opsd routes ${v.meta.type} work to ${to}`,
+        ...(blocker && { blocker }),
+      });
+    }
+    return out;
+  }
+
+  /** Why `v` needs an owner from opsd, or null; see `routes`. */
+  private routeReason(v: TaskView): string | null {
+    // A claim whose lease ran out holds nothing: its agent may be gone, so the task routes too.
+    const staleClaim = (v.status === 'claimed' || v.status === 'in-progress') && v.stale;
+    if (v.status !== 'todo' && v.status !== 'blocked' && !staleClaim) return null;
+    if (NOT_WORK_TYPES.has(v.meta.type)) return null;
+    if (!v.owner) return `${v.meta.id} has no owner`;
+    if (isHuman(v.owner)) return null;
+    const why = this.unreachable(v.owner);
+    return why ? `owner ${why}` : null;
+  }
+
+  /**
+   * Gives an ownerless task the role group `to` as its owner, as an `assign` event with the reason
+   * (AO-0140). For opsd only. Checked again under the task lock, so an owner set meanwhile stays.
+   */
+  route(ref: string, to: string, reason: string): ActResult {
+    assertOwner(to);
+    if (!this.actor || runtimeOf(this.actor) !== 'opsd') {
+      throw new OpsError('only opsd routes tasks to a role group', 1);
+    }
+    return this.act(ref, (v) => {
+      if (!this.routeReason(v)) {
+        throw new OpsError(`${v.meta.id} needs no route: it is ${v.status}, owner ${v.owner}`);
+      }
+      const keepWait = v.status === 'blocked';
+      return [{ type: 'assign', to, body: reason, ...(keepWait && { keep_wait: true }) }];
+    });
+  }
+
   /** One warning per id that reaches no agent; for mentions and addressees, which are not refused. */
   reachWarnings(ids: Array<string | null | undefined>): string[] {
     const out: string[] = [];
@@ -653,10 +883,10 @@ export class Workspace {
     assertNoSecret(title, input.body);
     if (input.owner) assertOwner(input.owner);
     if (input.type === QUESTION_TYPE) assertQuestionTo(input.owner, actor, actor);
-    const why = input.owner && !isWildcard(input.owner) ? this.unreachable(input.owner) : null;
+    const why = input.owner ? this.ownerRefusal(input.owner) : null;
     if (why && !this.force) {
       throw new OpsError(
-        `owner ${why}; configured agents: ${this.knownAgents().join(', ')} (use --force to override)`,
+        `owner ${why}, so no run picks it up; ${this.ownerSuggestions(root)} (use --force to override)`,
       );
     }
     if (input.priority && !PRIORITIES.includes(input.priority)) {
@@ -1039,7 +1269,12 @@ export class Workspace {
       ctx.requireOpen('assign');
       ctx.needOwnerOrHolder();
       if (v.meta.type === QUESTION_TYPE) assertQuestionTo(to, v.meta.created_by, ctx.actor);
-      this.checkTarget(ctx, to, 'owner');
+      const why = this.ownerRefusal(to);
+      if (why) {
+        const root = this.roots.find((r) => r.name === v.root);
+        ctx.needForce(`owner ${why}, so no run picks it up; ${this.ownerSuggestions(root)}`);
+        ctx.warnings.push(`owner ${why}: no run picks it up`);
+      }
       // A blocked task keeps its open question (or wait on other tasks) under the new owner;
       // `answer` or `unblock` drop it on purpose (AO-0115). Handoff still clears the wait.
       const keepWait = v.status === 'blocked';
@@ -1182,11 +1417,14 @@ export class Workspace {
     ref: string,
     type: string,
     message = '',
-    opts: { to?: string; answer?: string } = {},
+    opts: { to?: string; answer?: string; priority?: Priority } = {},
   ): ActResult {
     if (opts.to) assertOwner(opts.to);
     if (!/^[a-z][a-z0-9-]{0,29}$/.test(type)) {
       throw new OpsError(`bad type '${type}': use lowercase letters, digits and hyphens`, 2);
+    }
+    if (opts.priority && !PRIORITIES.includes(opts.priority)) {
+      throw new OpsError(`bad priority '${opts.priority}': use p0, p1, p2 or p3`, 2);
     }
     const answer = opts.answer?.trim();
     return this.act(ref, (v, ctx) => {
@@ -1195,9 +1433,13 @@ export class Workspace {
       if (type === QUESTION_TYPE) {
         assertQuestionTo(opts.to ?? v.owner, v.meta.created_by, ctx.actor);
       }
-      // The owner and the answer to an open question land in the same write as the new type:
-      // triage never leaves half a change (AO-0093 was accepted but still waited for its answer).
+      // The owner, the priority and the answer to an open question land in the same write as the
+      // new type: triage never leaves half a change (AO-0093 was accepted but still waited for its
+      // answer).
       const events: PlannedEvent[] = [{ type: 'retype', task_type: type, body: message }];
+      if (opts.priority && opts.priority !== v.meta.priority) {
+        events.push({ type: 'priority', priority: opts.priority, body: '' });
+      }
       if (opts.to && opts.to !== v.owner) {
         ctx.requireOpen('assign');
         this.checkTarget(ctx, opts.to, 'owner');
@@ -1676,6 +1918,318 @@ export class Workspace {
       this.act(`${root.name}/${d.meta.task}`, () => [{ type: 'comment', to, body: text }]);
     }
     return d;
+  }
+
+  // ---- Repeating tasks (AO-0142) -------------------------------------------------------------
+
+  /** Finds the root of a repeat named `name` or `root/name`. */
+  resolveRepeat(ref: string): { root: Root; name: string } {
+    const slash = ref.indexOf('/');
+    const rootName = slash > 0 ? ref.slice(0, slash) : undefined;
+    const name = assertRepeatName(slash > 0 ? ref.slice(slash + 1) : ref);
+    const roots = rootName ? this.roots.filter((r) => r.name === rootName) : this.roots;
+    if (rootName && roots.length === 0) throw new OpsError(`no root named '${rootName}'`, 2);
+    const matches = roots.filter((r) => hasRepeat(r, name));
+    if (matches.length === 0) throw new OpsError(`no repeat '${name}'`, 2);
+    if (matches.length > 1)
+      throw new OpsError(`'${name}' exists in several roots; write <root>/${name}`, 2);
+    return { root: matches[0]!, name };
+  }
+
+  /**
+   * Adds a repeat, or with `replace` changes the one of that name. Each firing creates approved
+   * work, so only a human or the orchestrator manages repeats.
+   */
+  saveRepeat(input: RepeatInput, opts: { replace?: boolean } = {}): RepeatView {
+    const actor = this.requireActor();
+    if (!privileged(actor)) {
+      throw new OpsError(`${actor} cannot manage repeats: a human or the orchestrator does`);
+    }
+    // `root/name` or `root` names the root; an edit finds the repeat wherever it is, so it never
+    // writes a second copy into the default root.
+    const slash = input.name.indexOf('/');
+    const rootName = input.root?.trim() || (slash > 0 ? input.name.slice(0, slash) : undefined);
+    const name = assertRepeatName(slash > 0 ? input.name.slice(slash + 1) : input.name);
+    const ref = rootName ? `${rootName}/${name}` : name;
+    let root: Root;
+    if (opts.replace) {
+      root = this.resolveRepeat(ref).root;
+    } else if (rootName) {
+      const r = this.roots.find((x) => x.name === rootName);
+      if (!r) throw new OpsError(`no root named '${rootName}'`, 2);
+      root = r;
+    } else {
+      root = this.defaultRoot();
+    }
+    const title = input.title.trim();
+    if (!title) throw new OpsError('a repeat needs a title', 2);
+    assertNoSecret(title, input.body);
+    if (input.owner) {
+      assertOwner(input.owner);
+      const why = isWildcard(input.owner) ? null : this.unreachable(input.owner);
+      if (why && !this.force) {
+        throw new OpsError(
+          `owner ${why}; configured agents: ${this.knownAgents().join(', ')} (use --force to override)`,
+        );
+      }
+    }
+    if (input.priority && !PRIORITIES.includes(input.priority)) {
+      throw new OpsError(`bad priority '${input.priority}': use p0, p1, p2 or p3`, 2);
+    }
+    const existing = hasRepeat(root, name) ? readRepeat(root, name) : undefined;
+    if (opts.replace && !existing) throw new OpsError(`no repeat '${name}'`, 2);
+    if (!opts.replace && existing) throw new OpsError(`repeat '${name}' exists`, 2);
+    const parent = input.parent ? this.resolve(input.parent).id : undefined;
+    const when = input.when?.trim() || undefined;
+    if (when) this.resolve(parseCondition(when).task);
+    const meta: RepeatMeta = {
+      name,
+      title,
+      type: input.type || undefined,
+      priority: input.priority,
+      owner: input.owner || undefined,
+      project: input.project?.trim() || undefined,
+      parent,
+      labels: input.labels && input.labels.length > 0 ? input.labels : undefined,
+      start: input.start?.trim() ? normalizeStart(input.start) : undefined,
+      repeat: when ? undefined : ((input.repeat?.trim() || 'once') as RepeatRule),
+      days: input.days && input.days.length > 0 ? parseWeekdays(input.days) : undefined,
+      until: input.until?.trim() || undefined,
+      count: input.count,
+      when,
+      paused: input.paused || undefined,
+      created_by: existing?.meta.created_by ?? actor,
+      created_at: existing?.meta.created_at ?? new Date(this.now()).toISOString(),
+    };
+    validateRule(meta);
+    writeRepeat(root, meta, input.body ?? '');
+    return this.repeatView(`${root.name}/${name}`);
+  }
+
+  /** Every repeat in the visible roots, by name, then root. */
+  repeats(): RepeatView[] {
+    return this.scopedRoots()
+      .flatMap((r) => listRepeatNames(r).map((n) => this.viewRepeat(r, readRepeat(r, n), true)))
+      .sort((a, b) => a.meta.name.localeCompare(b.meta.name) || a.root.localeCompare(b.root));
+  }
+
+  repeatView(ref: string): RepeatView {
+    const { root, name } = this.resolveRepeat(ref);
+    return this.viewRepeat(root, readRepeat(root, name), true);
+  }
+
+  /** Pauses or resumes a repeat. Slots missed while paused fire once on resume. */
+  setRepeatPaused(ref: string, paused: boolean): RepeatView {
+    const actor = this.requireActor();
+    if (!privileged(actor)) {
+      throw new OpsError(`${actor} cannot manage repeats: a human or the orchestrator does`);
+    }
+    const { root, name } = this.resolveRepeat(ref);
+    root.lock(`repeat-${name}`, () => {
+      const def = readRepeat(root, name);
+      writeRepeat(root, { ...def.meta, paused: paused || undefined }, def.body);
+    });
+    return this.repeatView(`${root.name}/${name}`);
+  }
+
+  /** Deletes the repeat. The tasks it created stay. */
+  deleteRepeat(ref: string): void {
+    const actor = this.requireActor();
+    if (!privileged(actor)) {
+      throw new OpsError(`${actor} cannot manage repeats: a human or the orchestrator does`);
+    }
+    const { root, name } = this.resolveRepeat(ref);
+    root.lock(`repeat-${name}`, () => removeRepeat(root, name));
+  }
+
+  /**
+   * Creates the repeat's task now, whether or not a slot is due, paused or not. A time rule counts
+   * it as the slot of this minute, so a slot that passed before it does not fire as well.
+   */
+  runRepeat(ref: string): TaskMeta {
+    const actor = this.requireActor();
+    if (!privileged(actor)) {
+      throw new OpsError(`${actor} cannot run repeats: a human or the orchestrator does`);
+    }
+    const { root, name } = this.resolveRepeat(ref);
+    return root.lock(`repeat-${name}`, () => {
+      const def = readRepeat(root, name);
+      const nowMs = this.now();
+      const slot = def.meta.when ? `manual ${new Date(nowMs).toISOString()}` : localStamp(nowMs);
+      return this.fireRepeat(root, def, slot, nowMs);
+    });
+  }
+
+  /**
+   * Creates a task for every repeat that is due, once each. opsd calls it every tick; `ops repeat
+   * tick` does the same by hand. Any actor may: the repeats themselves were set by a person.
+   */
+  fireRepeats(): FiredRepeat[] {
+    const fired: FiredRepeat[] = [];
+    for (const root of this.scopedRoots()) {
+      for (const name of listRepeatNames(root)) {
+        try {
+          const meta = root.lock(`repeat-${name}`, () => {
+            let def: RepeatDef;
+            try {
+              def = readRepeat(root, name);
+            } catch {
+              return undefined;
+            }
+            if (def.meta.paused) return undefined;
+            // A cheap check on live tasks and the cached archive first; the archive is read
+            // again only when that says a slot is due.
+            if (!this.viewRepeat(root, def, false).due) return undefined;
+            const v = this.viewRepeat(root, def, true);
+            if (!v.due || v.state !== 'active') return undefined;
+            return this.fireRepeat(root, def, v.due, v.dueAt ?? this.now());
+          });
+          if (meta)
+            fired.push({ root: root.name, repeat: name, task: meta.id, slot: meta.repeat_slot! });
+        } catch {
+          // A broken repeat file must not stop the others; `ops repeat list` shows its error.
+        }
+      }
+    }
+    return fired;
+  }
+
+  private fireRepeat(root: Root, def: RepeatDef, slot: string, slotMs: number): TaskMeta {
+    const m = def.meta;
+    assertNoSecret(m.title, def.body);
+    const date = localStamp(slotMs).slice(0, 10);
+    const title = m.title.replaceAll('{date}', date);
+    const given = m.project?.trim();
+    const parent = m.parent && root.hasTask(m.parent) ? m.parent : undefined;
+    const project = given
+      ? root.projectName(given)
+      : parent
+        ? root.namedProject(parent)
+        : undefined;
+    const label = m.when ? `condition ${m.when}` : `the ${slot.replace('T', ' ')} slot`;
+    const note = `Created by repeat \`${m.name}\` for ${label}.`;
+    const body = def.body ? `${def.body}\n\n${note}` : note;
+    return root.createTask(
+      {
+        title,
+        type: m.type ?? 'task',
+        priority: m.priority ?? 'p2',
+        owner: m.owner,
+        project,
+        parent,
+        labels: m.labels && m.labels.length > 0 ? m.labels : undefined,
+        repeat: m.name,
+        repeat_slot: slot,
+        created_by: m.created_by,
+        created_at: new Date(this.now()).toISOString(),
+      },
+      body,
+      this.user.id_block ?? 0,
+    );
+  }
+
+  /** A repeat's state; `archive` reads the archive (and refreshes the cache) instead of the cache. */
+  private viewRepeat(root: Root, def: RepeatDef, archive: boolean): RepeatView {
+    const m = def.meta;
+    const nowMs = this.now();
+    const view: RepeatView = { ...def, root: root.name, rule: '', state: 'active', fired: 0 };
+    try {
+      validateRule(m);
+      view.rule = describeRule(m);
+    } catch (err) {
+      return { ...view, state: 'broken', note: (err as Error).message };
+    }
+    const live: RepeatTask[] = root
+      .states()
+      .filter((s) => s.meta.repeat === m.name)
+      .map((s) => ({
+        id: s.meta.id,
+        slot: String(s.meta.repeat_slot ?? ''),
+        created_at: s.meta.created_at,
+        status: s.status,
+      }));
+    const cache = readRepeatCache(root);
+    let archived = cache[m.name] ?? [];
+    if (archive) {
+      archived = archivedRepeatTasks(root, m.name);
+      if (JSON.stringify(archived) !== JSON.stringify(cache[m.name] ?? [])) {
+        writeRepeatCache(root, { ...cache, [m.name]: archived });
+      }
+    }
+    const byId = new Map<string, RepeatTask>();
+    for (const t of [...archived, ...live]) byId.set(t.id, { ...byId.get(t.id), ...t });
+    const tasks = [...byId.values()];
+    view.fired = tasks.length;
+    const last = tasks.sort((a, b) =>
+      a.created_at === b.created_at ? (a.id < b.id ? -1 : 1) : a.created_at < b.created_at ? -1 : 1,
+    )[tasks.length - 1];
+    if (last) view.last = last;
+
+    const finishedByCount = m.count !== undefined && view.fired >= m.count;
+    let due: string | null = null;
+    let dueAt: number | undefined;
+    if (m.when) {
+      const notBefore = m.start ? parseLocal(m.start) : -Infinity;
+      if (nowMs >= notBefore && (!m.until || nowMs <= parseLocal(`${m.until} 23:59`) + 59_999)) {
+        try {
+          const key = this.conditionKey(parseCondition(m.when));
+          if (key && !tasks.some((t) => t.slot === key)) {
+            due = key;
+            dueAt = nowMs;
+          }
+        } catch (err) {
+          view.note = (err as Error).message;
+        }
+      }
+    } else {
+      const slot = latestSlot(m, nowMs);
+      const lastSlot = tasks
+        .map((t) => t.slot)
+        .filter((s) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(s))
+        .sort()
+        .pop();
+      if (slot !== null && (!lastSlot || localStamp(slot) > lastSlot)) {
+        due = localStamp(slot);
+        dueAt = slot;
+      }
+      const next = nextSlot(m, nowMs);
+      if (next !== null) view.next = localStamp(next);
+    }
+    const open = last?.status !== undefined && OPEN_STATUSES.has(last.status as Status);
+    if (m.paused) view.state = 'paused';
+    else if (finishedByCount || (!m.when && !due && !view.next)) view.state = 'finished';
+    else if (due && open) {
+      view.state = 'waiting';
+      view.note = `${last!.id} from this repeat is still ${last!.status}; it fires once that closes`;
+    }
+    if (due && !finishedByCount) {
+      view.due = due;
+      if (dueAt !== undefined) view.dueAt = dueAt;
+    }
+    return view;
+  }
+
+  /** The key of a condition that holds now, or null. A new key fires the repeat again. */
+  private conditionKey(c: Condition): string | null {
+    const { root, id } = this.resolve(c.task);
+    const closeEvent = (taskId: string): string | null => {
+      if (OPEN_STATUSES.has(root.foldTask(taskId).status)) return null;
+      const ev = root.readEvents(taskId).filter(closesTask).pop();
+      return ev?.id ?? 'closed';
+    };
+    if (c.kind === 'closed') {
+      const ev = closeEvent(id);
+      return ev ? `closed ${id}@${ev}` : null;
+    }
+    const kids = root.states().filter((s) => s.meta.parent === id);
+    if (kids.length === 0) return null;
+    let newest = '';
+    for (const k of kids) {
+      const ev = closeEvent(k.meta.id);
+      if (!ev) return null;
+      if (ev > newest) newest = ev;
+    }
+    return `children-closed ${id}@${newest}`;
   }
 
   // ---- Inbox ---------------------------------------------------------------------------------

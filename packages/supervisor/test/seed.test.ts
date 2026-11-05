@@ -2,8 +2,18 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { readUserConfig } from '@agent-ops/core';
-import { invocation, opsdConfig, runModel, seedOnStart, seedUserConfig } from '../src/index.js';
+import type { UserConfig } from '@agent-ops/core';
+import { DEFAULT_PROVIDERS, readUserConfig, Workspace } from '@agent-ops/core';
+import type { OpsdConfig } from '../src/index.js';
+import {
+  DEFAULT_RUNTIMES,
+  invocation,
+  opsdConfig,
+  roleLimits,
+  runModel,
+  seedOnStart,
+  seedUserConfig,
+} from '../src/index.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -100,6 +110,28 @@ describe('seeding providers and agents', () => {
     expect(opsdConfig({ opsd: { agents: { 'codex:qa': null } } } as never).agents).toEqual({
       'codex:qa': {},
     });
+  });
+});
+
+describe('role providers in core and opsd (AO-0140)', () => {
+  it('agree, so the owner check and routing match what wake starts', () => {
+    expect(Object.keys(DEFAULT_RUNTIMES)).toEqual([...DEFAULT_PROVIDERS]);
+    const users: Array<UserConfig & { opsd?: Partial<OpsdConfig> }> = [
+      {},
+      { opsd: { runtimes: { fake: { command: 'fake' } } } },
+      { opsd: { seeded: true, runtimes: { fake: { command: 'fake' } } } },
+      { opsd: { roles: { qa: { providers: ['codex'], overflow: false } } } },
+    ];
+    for (const user of users) {
+      const cwd = mkdtempSync(join(tmpdir(), 'opsd-providers-'));
+      dirs.push(cwd);
+      const ws = new Workspace({ user, cwd, actor: 'human:dawid', env: {} as NodeJS.ProcessEnv });
+      const lim = roleLimits(opsdConfig(user), 'qa');
+      expect(ws.groupProviders('claude:qa')).toEqual({
+        providers: lim.providers,
+        overflow: lim.overflow,
+      });
+    }
   });
 });
 

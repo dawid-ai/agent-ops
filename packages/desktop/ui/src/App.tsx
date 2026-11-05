@@ -16,6 +16,7 @@ import {
   Plus,
   Radar,
   RefreshCw,
+  Repeat,
   Settings as SettingsIcon,
   TriangleAlert,
   Vote,
@@ -31,6 +32,7 @@ import type { SavedView } from './lib/filters';
 import { loadViews, storeViews, VIEWS_CHANGED } from './lib/filters';
 import type { AddAgentRequest } from './lib/goto';
 import { ADD_AGENT_EVENT } from './lib/goto';
+import { mouseNav } from './lib/history';
 import { findTask, isTyping, keyAction } from './lib/keys';
 import { useMover } from './ui/move';
 import { Palette, ShortcutHelp } from './ui/palette';
@@ -50,6 +52,7 @@ import { List } from './views/List';
 import { NewTask } from './views/NewTask';
 import { Reports } from './views/Reports';
 import { Runs } from './views/Runs';
+import { Repeating } from './views/Repeating';
 import { Schedules } from './views/Schedules';
 import { Settings } from './views/Settings';
 import { Setup } from './views/Setup';
@@ -69,6 +72,7 @@ export type View =
   | 'agents'
   | 'runs'
   | 'schedules'
+  | 'repeating'
   | 'decisions'
   | 'chat'
   | 'channels'
@@ -95,6 +99,7 @@ const GROUPS: Array<{ title: string; items: Array<[View, string, LucideIcon]> }>
       ['agents', 'Agents', Bot],
       ['runs', 'Runs', Activity],
       ['schedules', 'Schedules', CalendarClock],
+      ['repeating', 'Repeating', Repeat],
     ],
   },
   {
@@ -162,7 +167,25 @@ export function App() {
   const [view, setView] = useState<View>('inbox');
   const [arg, setArg] = useState<string | undefined>();
   // The open task and the event a task reference points at.
-  const { task, focus, open: setTask } = useTaskFocus();
+  const { task, focus, open: setTask, back, forward } = useTaskFocus();
+  // Back and Forward for the key and mouse listeners below, which are added once.
+  const moves = useRef({ back, forward });
+  moves.current = { back, forward };
+  useEffect(() => {
+    const onMouse = (e: MouseEvent): void => {
+      const dir = mouseNav(e.button);
+      if (!dir) return;
+      // Stop Chromium's own page history on the side buttons too.
+      e.preventDefault();
+      if (e.type === 'mouseup') moves.current[dir]?.();
+    };
+    window.addEventListener('mousedown', onMouse);
+    window.addEventListener('mouseup', onMouse);
+    return () => {
+      window.removeEventListener('mousedown', onMouse);
+      window.removeEventListener('mouseup', onMouse);
+    };
+  }, []);
   // Task references in rendered text (lib/refs.ts) open the task panel.
   useEffect(() => {
     const onClick = (e: MouseEvent): void => {
@@ -330,6 +353,10 @@ export function App() {
           break;
         case 'help':
           setHelp(true);
+          break;
+        case 'back':
+        case 'forward':
+          moves.current[r.action.kind]?.();
           break;
         case 'search':
           document
@@ -556,6 +583,7 @@ export function App() {
           {view === 'agents' && <Agents nav={nav} />}
           {view === 'runs' && <Runs nav={nav} selected={arg} />}
           {view === 'schedules' && <Schedules nav={nav} selected={arg} />}
+          {view === 'repeating' && <Repeating nav={nav} />}
           {view === 'decisions' && <Decisions key={arg ?? ''} nav={nav} selected={arg} />}
           {view === 'chat' && <Chat nav={nav} />}
           {view === 'channels' && <Channels nav={nav} selected={arg} />}
@@ -569,6 +597,8 @@ export function App() {
           focus={focus ?? undefined}
           nav={nav}
           onClose={() => setTask(null)}
+          onBack={back ?? undefined}
+          onForward={forward ?? undefined}
         />
       )}
       <Toaster />

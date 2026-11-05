@@ -50,6 +50,8 @@ export interface OpsEvent {
   on?: string[];
   verdict?: string;
   priority?: string;
+  /** retype: the new task type. */
+  task_type?: string;
   ref?: string;
   run?: string;
   exit?: number | null;
@@ -400,6 +402,40 @@ export interface Schedule {
   paused?: boolean;
   last_run: string | null;
   next_run: string | null;
+}
+
+/** One repeating task from `GET /api/repeats` (AO-0142). */
+export interface Repeat {
+  root: string;
+  meta: {
+    name: string;
+    title: string;
+    type?: string;
+    priority?: string;
+    owner?: string;
+    project?: string;
+    parent?: string;
+    labels?: string[];
+    /** Local wall time `YYYY-MM-DDTHH:MM`. */
+    start?: string;
+    repeat?: 'once' | 'daily' | 'weekly' | 'weekdays' | 'monthly' | 'yearly';
+    days?: string[];
+    until?: string;
+    count?: number;
+    /** `closed AO-0012` or `children-closed AO-0012`. */
+    when?: string;
+    paused?: boolean;
+    created_by: string;
+    created_at: string;
+  };
+  body: string;
+  rule: string;
+  state: 'active' | 'waiting' | 'paused' | 'finished' | 'broken';
+  fired: number;
+  last?: { id: string; slot: string; created_at: string; status?: Status };
+  next?: string;
+  due?: string;
+  note?: string;
 }
 
 export interface RoleLimits {

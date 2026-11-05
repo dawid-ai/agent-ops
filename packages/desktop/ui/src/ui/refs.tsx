@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { Fragment, useCallback, useRef, useState, useSyncExternalStore } from 'react';
+import type { TaskHistory } from '../lib/history';
+import { goBack, goForward, NO_HISTORY, openTask } from '../lib/history';
 import { statusInfo } from '../lib/identity';
 import type { RefTask } from '../lib/refs';
 import {
@@ -25,25 +27,43 @@ export interface TaskFocus {
 }
 
 /**
- * The open task and the event a reference points at. `open('AO-0014#<event id>')` opens the task
- * and focuses the event, `open('AO-0014')` opens it unfocused, `open(null)` closes it. `n` comes
- * from a counter that never resets, so every event reference opened gets a new token, even after
- * a plain reference cleared the focus.
+ * The open task, the event a reference points at, and Back and Forward (lib/history.ts).
+ * `open('AO-0014#<event id>')` opens the task and focuses the event, `open('AO-0014')` opens it
+ * unfocused, `open(null)` closes it and clears the history. Opening a task while one is open adds
+ * the open one to Back. `back` and `forward` are null when there is nowhere to go. `n` comes from
+ * a counter that never resets, so every event reference opened gets a new token, even after a
+ * plain reference cleared the focus.
  */
 export function useTaskFocus(): {
   task: string | null;
   focus: TaskFocus | null;
   open: (ref: string | null) => void;
+  back: (() => void) | null;
+  forward: (() => void) | null;
 } {
-  const [task, setTask] = useState<string | null>(null);
+  const [history, setHistory] = useState<TaskHistory>(NO_HISTORY);
   const [focus, setFocus] = useState<TaskFocus | null>(null);
   const seq = useRef(0);
   const open = useCallback((ref: string | null): void => {
     const r = ref ? parseTaskRef(ref) : null;
-    setTask(r?.task ?? null);
+    setHistory((h) => openTask(h, r?.task ?? null));
     setFocus(r?.event ? { event: r.event, n: ++seq.current } : null);
   }, []);
-  return { task, focus, open };
+  const goBackFn = useCallback((): void => {
+    setHistory(goBack);
+    setFocus(null);
+  }, []);
+  const goForwardFn = useCallback((): void => {
+    setHistory(goForward);
+    setFocus(null);
+  }, []);
+  return {
+    task: history.current,
+    focus,
+    open,
+    back: history.back.length > 0 ? goBackFn : null,
+    forward: history.forward.length > 0 ? goForwardFn : null,
+  };
 }
 
 /**

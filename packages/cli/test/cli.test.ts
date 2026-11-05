@@ -394,13 +394,41 @@ describe('agent ids nothing defines', () => {
       'needs-review',
     );
 
-    // A role pattern that matches an agent passes quietly; one that matches none warns at once.
+    // A role group needs a waking agent (AO-0140): claude:engineer is defined but does not wake.
+    const asleep = ops(d, 'human:dawid', 'new', 'Any', 'engineer', '--to', '*:engineer');
+    expect(asleep.code).toBe(1);
+    expect(asleep.err).toMatch(/owner \*:engineer matches no waking agent, so no run picks it up/);
+    expect(asleep.err).toContain(
+      'use a role group (*:qa), or a configured agent (claude:engineer, codex:qa), or human:dawid',
+    );
+    writeFileSync(
+      join(d, 'none.yml'),
+      "opsd:\n  agents:\n    'codex:qa': { wake: true }\n    'claude:engineer': { wake: true }\n",
+    );
+    // A role group with a waking agent passes quietly; one with none is refused, as is assign.
     const ok = ops(d, 'human:dawid', 'new', 'Any', 'engineer', '--to', '*:engineer');
     expect(ok.code).toBe(0);
     expect(ok.err).toBe('');
     const orphan = ops(d, 'human:dawid', 'new', 'Orchestrate', '--to', '*:orchestrator');
-    expect(orphan.code).toBe(0);
-    expect(orphan.err).toMatch(/warning: \*:orchestrator matches no configured agent/);
+    expect(orphan.code).toBe(1);
+    expect(orphan.err).toMatch(/owner \*:orchestrator matches no waking agent/);
+    expect(orphan.err).toContain('*:engineer, *:qa');
+    const reassign = ops(d, 'human:dawid', 'assign', ok.out, '*:orchestrator');
+    expect(reassign.code).toBe(1);
+    expect(reassign.err).toMatch(/owner \*:orchestrator matches no waking agent/);
+    expect(ops(d, 'human:dawid', 'assign', ok.out, 'claude:release').code).toBe(1);
+    expect(ops(d, 'human:dawid', 'assign', ok.out, '*:qa').code).toBe(0);
+    const forcedGroup = ops(
+      d,
+      'human:dawid',
+      'new',
+      'Orchestrate',
+      '--to',
+      '*:orchestrator',
+      '--force',
+    );
+    expect(forcedGroup.code).toBe(0);
+    expect(forcedGroup.err).toMatch(/warning: \*:orchestrator matches no configured agent/);
     const post = ops(d, 'human:dawid', 'channel', 'post', 'general', 'hi', '@*:orchestrator');
     expect(post.code).toBe(0);
     expect(post.err).toMatch(/warning: \*:orchestrator matches no configured agent/);
@@ -709,5 +737,86 @@ describe('a review request for code left uncommitted (AO-0136)', () => {
     const withBase = started();
     writeFileSync(join(withBase, 'login.ts'), 'export {};\n');
     expect(review(withBase, 'RUNWITHBASE')).toBe(0);
+  });
+});
+
+describe('ops repeat (AO-0142)', () => {
+  it('adds, edits, pauses, runs and deletes a repeating task', () => {
+    const d = repo();
+    ops(d, 'human:dawid', 'init', '--name', 'demo', '--human', 'human:dawid');
+    const add = ops(
+      d,
+      'human:dawid',
+      'repeat',
+      'add',
+      'standup',
+      '--title',
+      'Standup {date}',
+      '--start',
+      '2020-01-06 09:00',
+      '--every',
+      'weekdays',
+      '--days',
+      'mon,thu',
+      '--owner',
+      'claude:engineer',
+      '--force',
+      '-m',
+      'Post the plan.',
+    );
+    expect(add.err).toBe('');
+    expect(add.out).toMatch(/^standup\s+active\s+on mon, thu at 09:00 from 2020-01-06/);
+    expect(ops(d, 'claude:engineer', 'repeat', 'pause', 'standup').code).toBe(1);
+    expect(ops(d, 'human:dawid', 'repeat', 'pause', 'standup').out).toMatch(/paused/);
+    expect(ops(d, 'human:dawid', 'repeat', 'tick').out).toBe('nothing due');
+    expect(ops(d, 'human:dawid', 'repeat', 'resume', 'standup').out).toMatch(/active/);
+    // Slots passed since 2020: one task for the latest.
+    const tick = ops(d, 'human:dawid', 'repeat', 'tick');
+    expect(tick.out).toMatch(/^standup: created T-0001 for \d{4}-\d{2}-\d{2}T09:00$/);
+    expect(ops(d, 'human:dawid', 'repeat', 'tick').out).toBe('nothing due');
+    const edit = ops(d, 'human:dawid', 'repeat', 'edit', 'standup', '--every', 'daily');
+    expect(edit.code).toBe(2);
+    expect(edit.err).toMatch(/--days goes with the weekdays rule only/);
+    const edited = ops(d, 'human:dawid', 'repeat', 'edit', 'standup', '--when', 'closed T-0001');
+    expect(edited.out).toMatch(/when closed T-0001/);
+    const show = ops(d, 'human:dawid', 'repeat', 'show', 'standup');
+    expect(show.out).toMatch(/fired:\s+1\s+last: T-0001 \(todo\)/);
+    expect(show.out).toMatch(/Post the plan\./);
+    expect(ops(d, 'human:dawid', 'repeat', 'run', 'standup').out).toBe('created T-0002');
+    expect(ops(d, 'human:dawid', 'repeat', 'delete', 'standup').out).toMatch(/deleted/);
+    expect(ops(d, 'human:dawid', 'repeat', 'list').out).toBe('no repeats');
+    expect(ops(d, 'human:dawid', 'show', 'T-0002').code).toBe(0);
+  });
+
+  it('lists a name two roots share as root/name, and that ref targets one repeat', () => {
+    const alpha = repo();
+    const beta = repo();
+    const env = {
+      OPS_CONFIG: join(alpha, 'none.yml'),
+      OPS_AGENT: 'human:dawid',
+      OPS_ROOTS: beta,
+    } as NodeJS.ProcessEnv;
+    const cli = (cwd: string, ...argv: string[]) => {
+      const out: string[] = [];
+      const code = run(argv, { out: (l) => out.push(l), err: () => {}, env, cwd });
+      return { code, out };
+    };
+    cli(alpha, 'init', '--name', 'alpha', '--human', 'human:dawid');
+    cli(beta, 'init', '--name', 'beta', '--human', 'human:dawid');
+    const same = ['--title', 'Report', '--start', '2099-01-05 09:00', '--every', 'weekly'];
+    expect(cli(alpha, 'repeat', 'add', 'alpha/report', ...same).code).toBe(0);
+    expect(cli(alpha, 'repeat', 'add', 'beta/report', ...same).code).toBe(0);
+    expect(cli(alpha, 'repeat', 'add', 'standup', ...same).code).toBe(0);
+    const list = cli(alpha, 'repeat', 'list');
+    expect(list.out.map((l) => l.split(/\s+/)[0])).toEqual([
+      'alpha/report',
+      'beta/report',
+      'standup',
+    ]);
+    const paused = cli(alpha, 'repeat', 'pause', list.out[1]!.split(/\s+/)[0]!);
+    expect(paused.out[0]).toMatch(/^beta\/report\s+paused/);
+    const after = cli(alpha, 'repeat', 'list').out;
+    expect(after[0]).toMatch(/^alpha\/report\s+active/);
+    expect(after[1]).toMatch(/^beta\/report\s+paused/);
   });
 });

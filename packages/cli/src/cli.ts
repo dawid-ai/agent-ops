@@ -9,6 +9,8 @@ import type {
   InboxItem,
   OpsEvent,
   Priority,
+  RepeatInput,
+  RepeatView,
   Status,
   TaskView,
 } from '@agent-ops/core';
@@ -292,6 +294,35 @@ function printDecision(ctx: Ctx, d: Decision, full: boolean): void {
   if (d.outcome?.body) o(`\noutcome: ${d.outcome.body}`);
 }
 
+/** Names used by more than one root; those repeats print as `root/name`, the form commands take. */
+function sharedRepeatNames(all: RepeatView[]): Set<string> {
+  const seen = new Set<string>();
+  const shared = new Set<string>();
+  for (const r of all) (seen.has(r.meta.name) ? shared : seen).add(r.meta.name);
+  return shared;
+}
+
+function printRepeat(ctx: Ctx, r: RepeatView, full: boolean, shared?: Set<string>): void {
+  const o = ctx.io.out;
+  const next = r.next ? `    next: ${r.next.replace('T', ' ')}` : '';
+  const label = shared?.has(r.meta.name) ? `${r.root}/${r.meta.name}` : r.meta.name;
+  o(`${pad(label, 20)} ${pad(r.state, 9)} ${r.rule || '-'}${next}`);
+  if (r.note) o(`  note: ${r.note}`);
+  if (!full) return;
+  const m = r.meta;
+  o(`title:    ${m.title}`);
+  o(`owner:    ${m.owner ?? '-'}    priority: ${m.priority ?? 'p2'}    type: ${m.type ?? 'task'}`);
+  if (m.project) o(`project:  ${m.project}`);
+  if (m.parent) o(`parent:   ${m.parent}`);
+  if (m.labels) o(`labels:   ${m.labels.join(', ')}`);
+  o(
+    `created:  ${m.created_at.slice(0, 16).replace('T', ' ')} by ${m.created_by}    root: ${r.root}`,
+  );
+  const last = r.last ? `    last: ${r.last.id} (${r.last.status ?? 'archived'})` : '';
+  o(`fired:    ${r.fired}${last}`);
+  if (r.body) o(`\n${r.body}`);
+}
+
 function arg(ctx: Ctx, i: number, name: string): string {
   const v = ctx.args[i];
   if (!v) usageError(`missing ${name}`);
@@ -549,7 +580,7 @@ const COMMANDS: Record<string, Command> = {
           );
         }
       }
-      // A refused owner never gets here; a wildcard that matches no agent is a warning.
+      // A refused owner gets here only with --force; then it is a warning.
       printWarnings(ctx, ws.reachWarnings([owner]));
     },
   },
@@ -838,16 +869,22 @@ const COMMANDS: Record<string, Command> = {
       ),
   },
   retype: {
-    usage: 'retype ID TYPE [MESSAGE] [--to OWNER] [--answer TEXT]',
+    usage: 'retype ID TYPE [MESSAGE] [--to OWNER] [--priority P] [--answer TEXT]',
     summary:
-      'change the task type, such as finding to bug or idea (human or orchestrator); --answer also answers its open question',
-    options: { to: { type: 'string' }, answer: { type: 'string' }, ...MESSAGE_OPTIONS },
+      'change the task type, such as finding to bug or idea (human or orchestrator); --to and --priority set the owner and priority in the same write; --answer also answers its open question',
+    options: {
+      to: { type: 'string' },
+      priority: { type: 'string' },
+      answer: { type: 'string' },
+      ...MESSAGE_OPTIONS,
+    },
     run: (ctx) =>
       printAct(
         ctx,
         ctx.ws().retype(arg(ctx, 0, 'task id'), arg(ctx, 1, 'type'), message(ctx, 2, false), {
           to: str(ctx.opts.to),
           answer: str(ctx.opts.answer),
+          priority: str(ctx.opts.priority) as Priority | undefined,
         }),
       ),
   },
@@ -1024,6 +1061,140 @@ const COMMANDS: Record<string, Command> = {
         const text = m.body.replace(/\n+/g, ' ');
         ctx.io.out(`${m.at.slice(0, 16).replace('T', ' ')}  ${pad(m.actor, 18)}${task} ${text}`);
       }
+    },
+  },
+  repeat: {
+    usage:
+      'repeat list | show NAME | add NAME --title T (--start "2026-11-05 09:00" [--every once|daily|weekly|weekdays|monthly|yearly] [--days mon,thu] | --when "closed ID" | --when "children-closed ID") [--until DATE] [--count N] [--owner ID] [--project P] [--priority P] [--type T] [--label L]... [--parent ID] [-m BODY] | edit NAME [same options] | pause NAME | resume NAME | delete NAME | run NAME | tick',
+    summary:
+      'repeating tasks: a template that creates a task on a date, on a schedule or when a task closes',
+    options: {
+      title: { type: 'string' },
+      start: { type: 'string' },
+      every: { type: 'string' },
+      days: { type: 'string' },
+      when: { type: 'string' },
+      until: { type: 'string' },
+      count: { type: 'string' },
+      owner: { type: 'string' },
+      project: { type: 'string' },
+      priority: { type: 'string' },
+      type: { type: 'string' },
+      label: { type: 'string', multiple: true },
+      parent: { type: 'string' },
+      paused: { type: 'boolean' },
+      ...MESSAGE_OPTIONS,
+    },
+    run: (ctx) => {
+      const ws = ctx.ws();
+      const action = arg(
+        ctx,
+        0,
+        "'list', 'show', 'add', 'edit', 'pause', 'resume', 'delete', 'run' or 'tick'",
+      );
+      const json = (v: unknown): void => ctx.io.out(JSON.stringify(v, null, 2));
+      if (action === 'list') {
+        const all = ws.repeats();
+        if (ctx.opts.json) return json(all);
+        if (all.length === 0) ctx.io.out('no repeats');
+        const shared = sharedRepeatNames(all);
+        for (const r of all) printRepeat(ctx, r, false, shared);
+        return;
+      }
+      if (action === 'tick') {
+        const fired = ws.fireRepeats();
+        if (ctx.opts.json) return json(fired);
+        if (fired.length === 0) ctx.io.out('nothing due');
+        for (const f of fired) ctx.io.out(`${f.repeat}: created ${f.task} for ${f.slot}`);
+        return;
+      }
+      const name = arg(ctx, 1, 'repeat name');
+      // A root-qualified name prints back as root/name.
+      const asGiven = name.includes('/') ? new Set([name.slice(name.indexOf('/') + 1)]) : undefined;
+      if (action === 'show') {
+        const r = ws.repeatView(name);
+        return ctx.opts.json ? json(r) : printRepeat(ctx, r, true);
+      }
+      if (action === 'add' || action === 'edit') {
+        const count = str(ctx.opts.count);
+        if (count !== undefined && !/^\d+$/.test(count)) usageError(`bad --count '${count}'`);
+        const given: Partial<RepeatInput> = {
+          title: str(ctx.opts.title),
+          start: str(ctx.opts.start),
+          repeat: str(ctx.opts.every),
+          days: str(ctx.opts.days),
+          when: str(ctx.opts.when),
+          until: str(ctx.opts.until),
+          count: count === undefined ? undefined : Number(count),
+          owner: str(ctx.opts.owner),
+          project: str(ctx.opts.project),
+          priority: str(ctx.opts.priority) as Priority | undefined,
+          type: str(ctx.opts.type),
+          labels: ctx.opts.label === undefined ? undefined : list(ctx.opts.label),
+          parent: str(ctx.opts.parent),
+          paused: ctx.opts.paused === undefined ? undefined : Boolean(ctx.opts.paused),
+        };
+        const body =
+          ctx.opts.message !== undefined || ctx.opts['body-file'] ? bodyText(ctx) : undefined;
+        if (body !== undefined) given.body = body;
+        const defined = Object.fromEntries(
+          Object.entries(given).filter(([, v]) => v !== undefined),
+        ) as Partial<RepeatInput>;
+        let input: RepeatInput;
+        if (action === 'add') {
+          if (!defined.title) usageError('a repeat needs --title');
+          input = { ...defined, name, title: defined.title };
+        } else {
+          const cur = ws.repeatView(name);
+          const m = cur.meta;
+          // A condition and a time rule exclude each other: setting one drops the other.
+          const rule = defined.when
+            ? { start: defined.start, repeat: undefined, days: undefined }
+            : defined.repeat || defined.start || defined.days
+              ? { when: undefined }
+              : {};
+          input = {
+            name: m.name,
+            root: cur.root,
+            title: m.title,
+            body: cur.body,
+            type: m.type,
+            priority: m.priority,
+            owner: m.owner,
+            project: m.project,
+            parent: m.parent,
+            labels: m.labels,
+            start: m.start,
+            repeat: m.repeat,
+            days: m.days,
+            until: m.until,
+            count: m.count,
+            when: m.when,
+            paused: m.paused,
+            ...rule,
+            ...defined,
+          };
+        }
+        const r = ws.saveRepeat(input, { replace: action === 'edit' });
+        return ctx.opts.json ? json(r) : printRepeat(ctx, r, false, asGiven);
+      }
+      if (action === 'pause' || action === 'resume') {
+        const r = ws.setRepeatPaused(name, action === 'pause');
+        return ctx.opts.json ? json(r) : printRepeat(ctx, r, false, asGiven);
+      }
+      if (action === 'delete') {
+        ws.deleteRepeat(name);
+        ctx.io.out(`deleted repeat ${name}; the tasks it created stay`);
+        return;
+      }
+      if (action === 'run') {
+        const meta = ws.runRepeat(name);
+        ctx.io.out(ctx.opts.json ? JSON.stringify(meta, null, 2) : `created ${meta.id}`);
+        return;
+      }
+      usageError(
+        `unknown action '${action}': use list, show, add, edit, pause, resume, delete, run or tick`,
+      );
     },
   },
   propose: {

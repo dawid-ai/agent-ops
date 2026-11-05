@@ -39,6 +39,7 @@ import {
   withStoreCheckoutRule,
 } from '../src/index.js';
 import { Checkout } from '../src/checkout.js';
+import { killOwn } from './own-procs.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoTop = join(here, '..', '..', '..');
@@ -1078,6 +1079,7 @@ describe('daemon', () => {
     as('human:dawid').newTask({ title: 'long work', owner: 'fake:engineer' });
     const first = await startDaemon({ env, cwd: repo });
     let runPid: number | undefined;
+    let runSeen = 0;
     try {
       const launched = await daemonCall<RunRecord>(first, 'POST', '/api/runs', {
         agent: 'fake:engineer',
@@ -1098,6 +1100,7 @@ describe('daemon', () => {
         expect(run.image).toBe('node.exe');
       }
       runPid = run.pid;
+      runSeen = Date.now();
 
       // Before the fix, the run's handles kept the old opsd alive and this timed out.
       expect(await stopDaemon({ env })).toBe(true);
@@ -1129,8 +1132,8 @@ describe('daemon', () => {
       expect(done).toMatchObject({ status: 'ended', reason: 'killed' });
     } finally {
       if (readDaemon(env)) await stopDaemon({ env, killRuns: true });
-      // Only this test's own fake agent, by the PID its opsd printed.
-      if (runPid !== undefined && isAlive(runPid)) process.kill(runPid);
+      // Only this test's own fake agent, by the PID its opsd printed, while it still runs it.
+      if (runPid !== undefined && isAlive(runPid)) await killOwn(runPid, runSeen);
     }
   }, 90_000);
 
@@ -1489,6 +1492,7 @@ describe('fail-closed identity', () => {
         expect(launcher).not.toBe(run.shim_pid);
         expect(Number(readFileSync(mark, 'utf8'))).toBe(launcher);
         const agent = Number(readFileSync(agentPid, 'utf8'));
+        const seen = Date.now();
         try {
           if (how === 'kill') {
             sup.kill(run.id);
@@ -1500,8 +1504,8 @@ describe('fail-closed identity', () => {
           }
           await until(() => !isAlive(launcher) && !isAlive(agent), 20_000);
         } finally {
-          // Only the PIDs this test's run printed.
-          for (const pid of [launcher, agent]) if (isAlive(pid)) process.kill(pid);
+          // Only the PIDs this test's run printed, while they still run its processes.
+          for (const pid of [launcher, agent]) if (isAlive(pid)) await killOwn(pid, seen);
         }
       },
       60_000,
@@ -1897,6 +1901,7 @@ describe('process ledger', () => {
     const run = sup.launch({ agent: 'fake:engineer' });
     await until(() => existsSync(marker) && readFileSync(marker, 'utf8') !== '', 15_000);
     const cPid = Number(readFileSync(marker, 'utf8'));
+    const cSeen = Date.now();
     try {
       await sup.trackProcs();
       expect(sup.store.procs(run.id)?.entries.map((e) => e.pid)).toEqual(
@@ -1912,7 +1917,7 @@ describe('process ledger', () => {
       const views = await sup.procs(run.id);
       expect(views.find((v) => v.pid === cPid)).toMatchObject({ alive: false });
     } finally {
-      if (alive(cPid)) process.kill(cPid);
+      if (alive(cPid)) await killOwn(cPid, cSeen);
     }
   }, 40_000);
 
@@ -2716,10 +2721,12 @@ describe('bottlenecks and providers', () => {
       '---\nid: fake:engineer\n---\n',
     );
     const stranded = sup.waits().filter((w) => w.agents.length === 0);
+    // No agent wakes here, so opsd cannot route the owners' work to a role group (AO-0140).
+    const noRoute = '; opsd cannot route it: no waking agent answers to *:engineer';
     expect(stranded.map((w) => [w.task?.split('/').pop(), w.kind, w.reason])).toEqual([
-      [owned.id, 'task', 'owner claude:release is not a configured agent'],
+      [owned.id, 'task', `owner claude:release is not a configured agent${noRoute}`],
       [review.id, 'review', 'reviewer codex:backend is not a configured agent'],
-      [later.id, 'task', 'owner claude:copywriter is not a configured agent'],
+      [later.id, 'task', `owner claude:copywriter is not a configured agent${noRoute}`],
     ]);
     expect(stranded.map((w) => w.task)).not.toContain(fine.id);
     expect(
@@ -3881,9 +3888,13 @@ describe('role file status', () => {
     h.newTask({ title: 'open work' });
     const waits = sup.waits();
     // The review request waits; the role's queue is empty. Since AO-0099 an open review request
-    // is the review item only, not an inbox message too, so no inbox wake waits beside it.
-    expect(waits.map((w) => w.kind)).toEqual(['review']);
-    for (const w of waits) expect(w.reason).toMatch(/fake:qa is proposed in its role file/);
+    // is the review item only, not an inbox message too, so no inbox wake waits beside it. The
+    // unowned work waits too: no waking agent answers to its role group (AO-0140).
+    expect(waits.map((w) => w.kind)).toEqual(['review', 'task']);
+    expect(waits[0]!.reason).toMatch(/fake:qa is proposed in its role file/);
+    expect(waits[1]!.reason).toMatch(
+      /has no owner; opsd cannot route it: no waking agent .*\*:engineer/,
+    );
     await sup.tick();
     expect(sup.runs({ live: true })).toHaveLength(0);
     expect(() => sup.launch({ agent: 'fake:qa' })).toThrow(/proposed in its role file/);
@@ -3957,5 +3968,123 @@ describe('role file status', () => {
     await sup.tick();
     expect(sup.runs()).toHaveLength(0);
     expect(() => sup.runScheduleNow('digest')).toThrow(/fake:writer is paused in its role file/);
+  });
+});
+
+describe('routing ownerless work (AO-0140)', () => {
+  it('starts a run on an accepted finding within one tick, with no manual assign', async () => {
+    const { sup, as } = setup({
+      mode: 'hang',
+      opsd: {
+        agents: { 'fake:engineer': { wake: true }, 'fake:qa': { wake: true } },
+        roles: { engineer: { providers: ['fake'] }, qa: { providers: ['fake'] } },
+      },
+    });
+    const h = as('human:dawid');
+    const work = h.newTask({ title: 'work', owner: 'fake:engineer' });
+    as('fake:engineer').start(work.id, 'go');
+    const finding = as('fake:engineer').finding({ title: 'Login retries forever', task: work.id });
+    const id = finding.meta.id;
+    // Untriaged, the finding wakes nothing and opsd leaves its owner empty.
+    await sup.tick();
+    expect(sup.runs({ live: true }).map((r) => r.task)).not.toContain(id);
+    expect(h.view(id).owner).toBeNull();
+
+    h.retype(id, 'bug', 'Accepted in triage');
+    await sup.tick();
+    expect(h.view(id).owner).toBe('*:engineer');
+    const live = sup.runs({ live: true }).find((r) => r.task?.endsWith(id));
+    expect(live?.agent).toBe('fake:engineer');
+    const assign = h.showEvents(id).events.find((e) => e.type === 'assign');
+    expect(assign).toMatchObject({ actor: 'opsd:router', to: '*:engineer' });
+    expect(assign?.body.trim()).toBe(`${id} has no owner; opsd routes bug work to *:engineer`);
+  });
+
+  it('routes work whose owner is no configured agent, and lists what it cannot route', async () => {
+    const { sup, as, repo } = setup({
+      mode: 'hang',
+      opsd: {
+        agents: { 'fake:engineer': { wake: true } },
+        roles: { engineer: { providers: ['fake'] } },
+      },
+    });
+    // Written before any agent is defined, as tasks from before the owner check were.
+    const h = as('human:dawid');
+    const release = h.newTask({ title: 'release', owner: 'claude:release' });
+    const test = h.newTask({ title: 'cover login', type: 'test', owner: 'claude:tester' });
+    // The test's user config is empty, so a role file defines the agent.
+    writeFileSync(
+      join(repo, '.agent-ops', 'agents', 'fake-engineer.md'),
+      '---\nid: fake:engineer\n---\n',
+    );
+    const byTask = () => new Map(sup.waits().map((w) => [w.task?.split('/').pop(), w.reason]));
+    expect(byTask().get(release.id)).toBe(
+      'owner claude:release is not a configured agent; opsd routes it to *:engineer at the next tick',
+    );
+    expect(byTask().get(test.id)).toBe(
+      'owner claude:tester is not a configured agent; opsd cannot route it: no waking agent answers to *:qa',
+    );
+    await sup.tick();
+    expect(h.view(release.id).owner).toBe('*:engineer');
+    expect(sup.runs({ live: true }).map((r) => r.task?.split('/').pop())).toEqual([release.id]);
+    // The test task keeps its owner and still says why it waits.
+    expect(h.view(test.id).owner).toBe('claude:tester');
+    expect(byTask().get(test.id)).toMatch(/no waking agent answers to \*:qa/);
+  });
+
+  it('leaves an accepted finding unrouted when no waking agent is one of the role providers', async () => {
+    const { sup, as } = setup({
+      mode: 'hang',
+      opsd: {
+        agents: { 'fake:engineer': { wake: true } },
+        roles: { engineer: { providers: ['other'] } },
+      },
+    });
+    const h = as('human:dawid');
+    const work = h.newTask({ title: 'work', owner: 'fake:engineer' });
+    as('fake:engineer').start(work.id, 'go');
+    const id = as('fake:engineer').finding({ title: 'Login retries', task: work.id }).meta.id;
+    h.retype(id, 'bug', 'Accepted in triage');
+    await sup.tick();
+    // wakeCandidates would start no run on a *:engineer task here, so opsd does not assign one.
+    expect(h.view(id).owner).toBeNull();
+    expect(h.showEvents(id).events.some((e) => e.type === 'assign')).toBe(false);
+    expect(sup.runs({ live: true }).map((r) => r.task?.split('/').pop())).not.toContain(id);
+    const wait = sup.waits().find((w) => w.task?.endsWith(id));
+    expect(wait?.reason).toBe(
+      'no waking agent may take it (role providers, overflow or the expected reviewer); ' +
+        'opsd cannot route it: no waking agent of *:engineer is one of its providers ' +
+        '(opsd.roles.engineer.providers, overflow)',
+    );
+  });
+
+  it('leaves delegated work unrouted when the only waking provider is the expected reviewer', async () => {
+    const { sup, as, repo } = setup({
+      mode: 'hang',
+      opsd: {
+        agents: { 'fake:engineer': { wake: true } },
+        roles: { engineer: { providers: ['fake'] } },
+      },
+    });
+    // The test's user config is empty, so role files define the agents.
+    const agents = join(repo, '.agent-ops', 'agents');
+    writeFileSync(join(agents, 'fake-engineer.md'), '---\nid: fake:engineer\n---\n');
+    writeFileSync(join(agents, 'fake-qa.md'), '---\nid: fake:qa\n---\n');
+    const backend = join(agents, 'other-backend.md');
+    writeFileSync(backend, '---\nid: other:backend\n---\n');
+    const h = as('human:dawid');
+    const t = h.newTask({ title: 'fix', type: 'bug' });
+    h.delegate(t.id, 'other:backend', { review: 'fake:qa' });
+    // The delegate is removed; a routing assign would keep the delegation and its reviewer.
+    rmSync(backend);
+    await sup.tick();
+    // wakeCandidates never starts a fake run on work fake:qa reviews, so opsd does not assign.
+    expect(h.view(t.id).owner).toBe('other:backend');
+    expect(h.showEvents(t.id).events.some((e) => e.type === 'assign')).toBe(false);
+    expect(sup.runs({ live: true }).map((r) => r.task?.split('/').pop())).not.toContain(t.id);
+    const wait = sup.waits().find((w) => w.task?.endsWith(t.id));
+    expect(wait?.reason).toMatch(
+      /opsd cannot route it: every waking provider of \*:engineer is the provider of the expected reviewer fake:qa$/,
+    );
   });
 });

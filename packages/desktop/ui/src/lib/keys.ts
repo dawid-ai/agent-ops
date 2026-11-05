@@ -23,6 +23,8 @@ export const SHORTCUTS: Array<[string, string]> = [
   ['n', 'New task'],
   ['/', 'Search in this view'],
   ...Object.entries(GO_KEYS).map(([k, v]): [string, string] => [`g ${k}`, `Go to ${v.label}`]),
+  ['Alt+Left', 'Back to the previous task in the task panel (or the mouse back button)'],
+  ['Alt+Right', 'Forward again after Back'],
   ['?', 'This list'],
   ['Esc', 'Close a dialog or the palette'],
 ];
@@ -40,6 +42,8 @@ export type KeyAction =
   | { kind: 'new' }
   | { kind: 'search' }
   | { kind: 'help' }
+  | { kind: 'back' }
+  | { kind: 'forward' }
   | { kind: 'go'; view: string };
 
 export interface KeyInput {
@@ -54,7 +58,8 @@ export interface KeyInput {
  * What a key press does. `pendingG` is true right after a bare `g`; the result says whether the
  * next key completes a `g` sequence. Ctrl+K works everywhere, even in a dialog; the rest only
  * outside fields and dialogs, without Ctrl, Cmd or Alt, and letters without Shift. `?` needs Shift
- * on most layouts, so it is matched by the character it types.
+ * on most layouts, so it is matched by the character it types. Alt+Left and Alt+Right move back
+ * and forward in the task panel, outside fields and dialogs.
  */
 export function keyAction(
   e: KeyInput,
@@ -67,6 +72,11 @@ export function keyAction(
   // Ctrl+F also works while typing, but not in a dialog, which has its own fields.
   if ((e.ctrlKey || e.metaKey) && !e.altKey && k === 'f' && !state.modal) {
     return { action: { kind: 'find' }, pendingG: false };
+  }
+  const arrow = e.key === 'ArrowLeft' || e.key === 'ArrowRight';
+  const plainAlt = e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey;
+  if (arrow && plainAlt && !state.typing && !state.modal) {
+    return { action: { kind: e.key === 'ArrowLeft' ? 'back' : 'forward' }, pendingG: false };
   }
   if (state.typing || state.modal || e.ctrlKey || e.metaKey || e.altKey) {
     return { action: null, pendingG: false };

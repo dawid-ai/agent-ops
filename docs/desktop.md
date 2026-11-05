@@ -101,6 +101,7 @@ again shows the open one.
 | **Agents**    | What starts runs (wake, Run agent, schedules), **Create role**, each provider's usage and pause, work waiting with why, machines, agents by provider with live runs and backlog, agents ready without a role file        |
 | **Runs**      | Every run with its log, followed live; readable or **raw**; its processes and **Kill leftovers**; **Start a run**                                                                                                        |
 | **Schedules** | Recurring runs (opsd's cron): add, edit, pause, **Run now**, delete; templates for standups, inbox sweeps, nightly QA                                                                                                    |
+| **Repeating** | Repeating tasks: a template that creates a task once, daily, weekly, on chosen weekdays, monthly, yearly, or when a task or all its subtasks close; add, edit, pause, **Run now**, delete; state, next slot, last task   |
 | **Chat**      | One conversation with the orchestrator: replies stream in, what it changed shows as task links, `@*:orchestrator` posts from channels join it; **Stop**, **New conversation** (see [the supervisor](supervisor.md#chat)) |
 | **Channels**  | **New channel**, read and post; `@id` in a message puts it in that inbox                                                                                                                                                 |
 | **Decisions** | Tallies and ballots; decide ties and votes without quorum                                                                                                                                                                |
@@ -189,6 +190,8 @@ The settings live under `desktop.voice` in the user config: `engine` (`off`, `lo
 `program`, `model`, `language` (`auto` or a code such as `pl`) and `cloud_model`.
 
 **Keyboard.** Ctrl+K (Cmd+K on macOS) opens the command palette: find a task by id or title, go to a view, create a task, or move the open task (start, review, block, done, back to to do) through the same calls as the board. Outside text fields, `n` starts a new task, `/` focuses the view's search, `g` then a letter goes to a view (`g b` board, `g l` tasks, `g i` inbox, `g c` channels, `g k` knowledge), and `?` lists every shortcut.
+
+**Back and Forward in the task panel.** Following a task link inside the open task panel (a thread, a comment, the parent, a blocked-on task, a message) keeps the task you came from. **Back** in the panel header returns to it, and **Forward** goes again after Back. Alt+Left, Alt+Right and the mouse back and forward buttons do the same outside text fields. A link to the task already open adds no step. Closing the panel clears the history, so a task opened from a view with no panel open has no **Back**.
 
 ## Security
 
