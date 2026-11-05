@@ -1,0 +1,19 @@
+{
+  "name": "@agent-ops/supervisor",
+  "version": "0.2.0-beta.1",
+  "private": true,
+  "description": "opsd: per-machine supervisor for agent runs",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "@agent-ops/core": "0.2.0-beta.1"
+  },
+  "bin": {
+    "opsd": "dist/main.js"
+  }
+}

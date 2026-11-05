@@ -1,0 +1,74 @@
+name: release
+# A pushed version tag (v0.2.0-beta.1, v0.2.0, ...) checks the code, builds the Windows installer,
+# and publishes it with latest.yml to the GitHub Release for that tag. The desktop app's updater
+# reads latest.yml from the newest release.
+on:
+  push:
+    tags: ['v*']
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  # The tag matches package.json, CHANGELOG.md has the version's heading with every fragment
+  # folded, and UPDATES.md has its entry. Runs first, so a missing note fails in seconds.
+  release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/check-release.mjs "$GITHUB_REF_NAME"
+
+  gate:
+    needs: [release-notes]
+    uses: ./.github/workflows/ci.yml
+
+  build-win:
+    needs: [release-notes, gate]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:desktop
+      - run: npm run package -w @agent-ops/desktop
+      # The installed build must start its own opsd and render every view before it ships.
+      - run: npx electron-builder --win --dir --config electron-builder.yml --publish never
+        working-directory: packages/desktop
+      - run: node scripts/desktop-smoke.mjs --packaged
+      # Create the release with notes from UPDATES.md before electron-builder uploads into it:
+      # two uploaders racing on a missing release create two releases on one tag. The updater
+      # shows these notes as "what's new", so a version without an entry stops the release.
+      - name: Create the release with notes from UPDATES.md
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          notes="$(awk -v t="## ${tag} " '
+            index($0, t) == 1 { on = 1; next }
+            on && /^## v/ { exit }
+            on { print }
+          ' UPDATES.md)"
+          if [ -z "$(printf '%s' "$notes" | tr -d '[:space:]')" ]; then
+            echo "No UPDATES.md entry for ${tag}: add one before tagging." >&2
+            exit 1
+          fi
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "Agent Ops $tag" --notes "$notes"
+      - run: npx electron-builder --win --config electron-builder.yml --publish always
+        working-directory: packages/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Blocks commits that add keys, tokens or webhook URLs.
+exec node scripts/check-leaks.mjs --staged

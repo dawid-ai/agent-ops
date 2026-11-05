@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.ops/
+out/
+.env
+.env.*
+*.pem
+*.key
+
+# Desktop installer build output
+packages/desktop/release/

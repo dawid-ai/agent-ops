@@ -1,0 +1,16 @@
+{
+  "name": "@agent-ops/core",
+  "version": "0.2.0-beta.1",
+  "private": true,
+  "description": "Task store: event files, fold, index, sync, leak check",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
+  }
+}

@@ -1,0 +1,53 @@
+name: docs
+# Builds the docs site from docs/ and README.md (scripts/build-docs.mjs), checks its links, and
+# publishes it to GitHub Pages. Runs when a push to main changes the docs or their build, or by
+# hand. Only the public repo runs it: Pages serves from there, and the private repo keeps to local
+# checks (`npm run docs`) so it uses no Actions minutes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'README.md'
+      - 'scripts/build-docs.mjs'
+      - 'scripts/check-docs-links.mjs'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  build:
+    if: github.repository == 'dawid-ai/agent-ops'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The site needs only marked; --ignore-scripts skips the Electron download and git hooks.
+      - run: npm ci --ignore-scripts
+      - run: node scripts/build-docs.mjs
+      # Broken relative links and anchors fail the job; failing external links are warnings.
+      - run: node scripts/check-docs-links.mjs dist/docs --external
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/docs
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

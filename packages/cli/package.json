@@ -1,0 +1,20 @@
+{
+  "name": "@agent-ops/cli",
+  "version": "0.2.0-beta.1",
+  "private": true,
+  "description": "The ops command",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "bin": {
+    "ops": "dist/main.js"
+  },
+  "dependencies": {
+    "@agent-ops/core": "0.2.0-beta.1",
+    "@agent-ops/supervisor": "0.2.0-beta.1"
+  }
+}

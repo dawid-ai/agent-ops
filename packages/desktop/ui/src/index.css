@@ -1,0 +1,336 @@
+@import 'tailwindcss';
+@import '@fontsource/chakra-petch/500.css';
+@import '@fontsource/chakra-petch/600.css';
+@import '@fontsource/chakra-petch/700.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource-variable/jetbrains-mono';
+
+/* Ops room: near-black ink, a faint control-room grid, and one luminous color per identity. */
+@theme {
+  --font-sans: 'IBM Plex Sans', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Chakra Petch', 'IBM Plex Sans', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'Cascadia Mono', ui-monospace, monospace;
+
+  --color-ink-950: #05070a;
+  --color-ink-900: #090c11;
+  --color-ink-850: #0d1117;
+  --color-ink-800: #111620;
+  --color-ink-750: #161c28;
+  --color-ink-700: #1c2331;
+  --color-ink-600: #273042;
+  --color-ink-500: #3a4558;
+  --color-fg: #e7eaf0;
+  --color-fg-2: #b4bccb;
+  --color-fg-3: #7f8899;
+  --color-fg-4: #566074;
+
+  --color-signal: #5ce1e6;
+  --color-signal-2: #2bb9c6;
+  --color-ok: #3ddc97;
+  --color-warn: #ffb547;
+  --color-bad: #ff5d6c;
+  --color-info: #5aa9ff;
+  --color-review: #b18cff;
+
+  --animate-rise: rise 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-fade: fade 0.2s ease-out both;
+  --animate-pulse-dot: pulse-dot 1.8s ease-in-out infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes pulse-dot {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, currentColor 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, currentColor 0%, transparent);
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink-950);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The main stage: two soft glows and a 32px grid that fades toward the bottom. */
+.stage {
+  background:
+    radial-gradient(900px 420px at 85% -10%, rgb(92 225 230 / 0.07), transparent 60%),
+    radial-gradient(700px 380px at 10% 110%, rgb(177 140 255 / 0.05), transparent 60%),
+    linear-gradient(rgb(255 255 255 / 0.022) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, rgb(255 255 255 / 0.022) 1px, transparent 1px) 0 0 / 32px 32px,
+    var(--color-ink-900);
+}
+
+.panel {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.025), rgb(255 255 255 / 0.008));
+  border: 1px solid rgb(148 163 184 / 0.1);
+  border-radius: 12px;
+}
+
+.label-caps {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-fg-3);
+}
+
+::selection {
+  background: rgb(92 225 230 / 0.3);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-600) transparent;
+}
+
+/* Native date and time inputs follow the dark theme where they still appear. */
+input[type='date']::-webkit-calendar-picker-indicator,
+input[type='time']::-webkit-calendar-picker-indicator {
+  filter: invert(0.8);
+}
+
+.md {
+  line-height: 1.55;
+}
+.md p {
+  margin: 0.4rem 0;
+}
+.md ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+}
+.md ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+}
+.md code {
+  font-family: var(--font-mono);
+  background: var(--color-ink-700);
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.3rem;
+  font-size: 0.84em;
+}
+.md pre {
+  background: var(--color-ink-950);
+  border: 1px solid rgb(148 163 184 / 0.1);
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  padding: 0;
+}
+.md a {
+  color: var(--color-signal);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md h1,
+.md h2,
+.md h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  margin: 0.8rem 0 0.3rem;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+}
+.md th,
+.md td {
+  border: 1px solid rgb(148 163 184 / 0.15);
+  padding: 0.2rem 0.5rem;
+}
+.md blockquote {
+  border-left: 2px solid var(--color-ink-500);
+  padding-left: 0.75rem;
+  color: var(--color-fg-2);
+}
+/* Attached images: a thumbnail in the thread; a click opens the lightbox. */
+.md img.attachment {
+  display: inline-block;
+  vertical-align: top;
+  max-width: min(100%, 420px);
+  max-height: 280px;
+  margin: 0.3rem 0.3rem 0.3rem 0;
+  border: 1px solid rgb(148 163 184 / 0.15);
+  border-radius: 0.5rem;
+  cursor: zoom-in;
+  object-fit: contain;
+  background: var(--color-ink-950);
+}
+.md img.attachment:hover {
+  border-color: var(--color-signal);
+}
+.md img.attachment-blocked {
+  display: inline-block;
+  font-size: 0.84em;
+  color: var(--color-fg-4);
+}
+
+/* @mentions in rendered Markdown: a colored pill per provider (data-rt). */
+.md .mention {
+  --c: #94a3b8;
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  color: var(--c);
+  background: color-mix(in oklab, var(--c) 14%, transparent);
+  border: 1px solid color-mix(in oklab, var(--c) 30%, transparent);
+  white-space: nowrap;
+}
+.md .mention[data-rt='claude'] {
+  --c: #f08a5d;
+}
+.md .mention[data-rt='codex'] {
+  --c: #3ddc97;
+}
+.md .mention[data-rt='gemini'] {
+  --c: #6aa8ff;
+}
+.md .mention[data-rt='grok'] {
+  --c: #d4d9e2;
+}
+.md .mention[data-rt='human'] {
+  --c: #ffc857;
+}
+
+/* Task references in rendered Markdown and plain message text (lib/refs.ts): open the task panel. */
+a.task-ref {
+  color: var(--color-signal);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in oklab, var(--color-signal) 60%, transparent);
+  white-space: nowrap;
+}
+a.task-ref:hover {
+  border-bottom-style: solid;
+}
+
+/*
+ * A reference to a task the app knows is a chip: a status dot, the reference, and in Markdown
+ * bodies (task text, comments, channel posts) the title. Elsewhere, such as in titles and rows,
+ * the title shows on hover only, so lines stay short. Colors match STATUSES in lib/identity.ts.
+ */
+a.task-ref[data-status] {
+  --ref-c: #8b93a3;
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  gap: 0.35em;
+  padding: 0 0.4em;
+  border-bottom: none;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--ref-c) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ref-c) 30%, transparent);
+  vertical-align: baseline;
+}
+a.task-ref[data-status]:hover {
+  background: color-mix(in oklab, var(--ref-c) 18%, transparent);
+}
+a.task-ref .ref-dot {
+  flex: none;
+  align-self: center;
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--ref-c);
+}
+a.task-ref .ref-title {
+  display: none;
+  overflow: hidden;
+  max-width: 36ch;
+  color: var(--color-fg-2);
+  font-family: var(--font-sans);
+  text-overflow: ellipsis;
+}
+.md a.task-ref .ref-title {
+  display: inline-block;
+}
+a.task-ref[data-status='claimed'] {
+  --ref-c: #5ce1e6;
+}
+a.task-ref[data-status='in-progress'] {
+  --ref-c: #5aa9ff;
+}
+a.task-ref[data-status='blocked'] {
+  --ref-c: #ffb547;
+}
+a.task-ref[data-status='needs-review'] {
+  --ref-c: #b18cff;
+}
+a.task-ref[data-status='done'] {
+  --ref-c: #3ddc97;
+}
+a.task-ref[data-status='parked'] {
+  --ref-c: #566074;
+}
+a.task-ref[data-status='done'] .ref-title,
+a.task-ref[data-status='parked'] .ref-title {
+  color: var(--color-fg-3);
+}
+
+/*
+ * A row that opens one thing but shows text with task references. A link inside a button is
+ * invalid nested interactive content, so the row's button (.row-open) holds only the id and
+ * stretches over the whole row, and the reference links sit above it.
+ */
+.row-link {
+  position: relative;
+}
+.row-link .row-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.row-link .row-open:focus-visible {
+  outline: none;
+}
+.row-link:has(.row-open:focus-visible) {
+  outline: 2px solid color-mix(in oklab, var(--color-signal) 60%, transparent);
+  outline-offset: -2px;
+}
+.row-link a.task-ref {
+  position: relative;
+  z-index: 1;
+}

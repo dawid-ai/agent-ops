@@ -1,0 +1,43 @@
+name: ci
+# Runs for releases (release.yml calls it for a pushed version tag) or by hand. Day-to-day
+# checks run locally (typecheck, lint, vitest, leaks); agent work and task sync use no Actions
+# minutes.
+on:
+  workflow_call:
+  workflow_dispatch:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: node scripts/check-leaks.mjs
+      - run: npm run docs
+  desktop-smoke:
+    # Renders every desktop view offscreen against a scratch root; fails on a page error, a failed
+    # opsd call or a call the allowlist refuses.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y xvfb libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1
+      - run: npm ci
+      - run: npm run build:desktop
+      - run: xvfb-run -a npm run smoke:desktop

@@ -1,0 +1,44 @@
+{
+  "name": "agent-ops",
+  "version": "0.2.0-beta.1",
+  "private": true,
+  "description": "A team of AI agents and one human working one queue, with tasks as files in git",
+  "license": "MIT",
+  "repository": "github:dawid-ai/agent-ops",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/core",
+    "packages/cli",
+    "packages/supervisor",
+    "packages/desktop"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json && tsc -p packages/desktop/ui/tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "leaks": "node scripts/check-leaks.mjs",
+    "docs": "node scripts/build-docs.mjs && node scripts/check-docs-links.mjs",
+    "ops": "node packages/cli/dist/main.js",
+    "prepare": "node scripts/setup-hooks.mjs",
+    "build:desktop": "tsc -b && npm run build:ui -w @agent-ops/desktop",
+    "desktop": "npm run build:desktop && electron packages/desktop",
+    "smoke:desktop": "node scripts/desktop-smoke.mjs",
+    "dist": "npm run build:desktop && npm run dist -w @agent-ops/desktop"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.5",
+    "eslint": "^9.39.5",
+    "happy-dom": "^21.0.4",
+    "marked": "^18.1.2",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^3.2.7"
+  }
+}

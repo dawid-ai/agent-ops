@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src file:; script-src file: 'unsafe-inline'; style-src file: 'unsafe-inline'; img-src file: data:; font-src file:"
+    />
+    <title>Agent Ops promo</title>
+    <link rel="stylesheet" href="promo.css" />
+  </head>
+  <body>
+    <div id="stage"></div>
+    <script>
+      // The captures and their rectangles come from the render's assets folder (?assets=file URL).
+      window.ASSETS = new URLSearchParams(location.search).get('assets');
+      const data = document.createElement('script');
+      data.src = `${window.ASSETS}/data.js`;
+      data.onload = () => {
+        const main = document.createElement('script');
+        main.src = 'promo.js';
+        document.body.appendChild(main);
+      };
+      document.head.appendChild(data);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+# Windows installer and update feed for the Agent Ops desktop app, opsd and the ops command.
+# Build: npm run dist (stages release/app with scripts/package.mjs, then runs electron-builder).
+appId: ai.dawid.agentops
+productName: Agent Ops
+# electron is a devDependency with a range; pin the version actually installed so the build
+# does not depend on electron-builder's probe in an npm workspace.
+electronVersion: 45.2.1
+directories:
+  # The staged app: bundles only, no node_modules.
+  app: release/app
+  output: release/dist
+  buildResources: build
+# No asar: opsd and the ops command run the bundles from this folder with the app's executable
+# as Node (ELECTRON_RUN_AS_NODE), and they are plain files there.
+asar: false
+# The bundles carry their dependencies; the desktop package's node_modules are not needed.
+files:
+  - '**/*'
+  - '!node_modules{,/**/*}'
+extraResources:
+  - from: release/bin
+    to: bin
+  - from: build/path.ps1
+    to: path.ps1
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
+  # Signing reads CSC_LINK and CSC_KEY_PASSWORD from the environment; without them the build is
+  # unsigned. Checking update signatures needs a signed build (and electron-builder's winCodeSign
+  # bundle, which needs symlink rights to extract), so it is off until signing is set up.
+  verifyUpdateCodeSignature: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Agent Ops
+  runAfterFinish: true
+  include: build/installer.nsh
+  # A fixed name, so the README can link releases/latest/download/AgentOps-Setup.exe.
+  artifactName: AgentOps-Setup.${ext}
+publish:
+  provider: github
+  owner: dawid-ai
+  repo: agent-ops
+  # A draft is invisible to electron-updater.
+  releaseType: release

@@ -1,0 +1,11 @@
+# Keep every text file LF on every OS; Windows checkouts with core.autocrlf=true stay LF too.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+*.pem binary
+
+# Private: the task store never goes into the public export (scripts/export-public.mjs).
+.agent-ops/** export-ignore
+.agent-ops export-ignore
+docs/proposals/** export-ignore
