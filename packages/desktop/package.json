@@ -1,14 +1,14 @@
 {
   "name": "@agent-ops/desktop",
-  "version": "0.2.0-beta.4",
+  "version": "0.2.0-beta.5",
   "private": true,
   "description": "Agent Ops desktop: the Electron control room on top of opsd",
   "license": "MIT",
   "type": "module",
   "main": "dist/main.js",
   "dependencies": {
-    "@agent-ops/core": "0.2.0-beta.4",
-    "@agent-ops/supervisor": "0.2.0-beta.4",
+    "@agent-ops/core": "0.2.0-beta.5",
+    "@agent-ops/supervisor": "0.2.0-beta.5",
     "electron-updater": "^6.8.11"
   },
   "scripts": {

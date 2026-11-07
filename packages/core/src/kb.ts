@@ -93,11 +93,7 @@ export interface NoteFile {
   file: string;
 }
 
-/**
- * Note files in the root's `kb/` folder, or in one topic, sorted by topic and name. Symlinks and
- * junctions are skipped. The sort makes the order the same on every file system: Linux lists a
- * folder in hash order, so which notes fit the search cache would differ by machine.
- */
+/** Note files in the root's `kb/` folder, or in one topic. Symlinks and junctions are skipped. */
 export function noteFiles(root: Root, topic?: string): NoteFile[] {
   const kb = join(root.dir, 'kb');
   if (!plain(kb, 'dir')) return [];
@@ -105,13 +101,12 @@ export function noteFiles(root: Root, topic?: string): NoteFile[] {
     ? [kbTopic(topic)]
     : readdirSync(kb, { withFileTypes: true })
         .filter((d) => d.isDirectory())
-        .map((d) => d.name)
-        .sort();
+        .map((d) => d.name);
   const out: NoteFile[] = [];
   for (const t of topics) {
     const dir = join(kb, t);
     if (!plain(dir, 'dir')) continue;
-    for (const name of readdirSync(dir).sort()) {
+    for (const name of readdirSync(dir)) {
       if (!name.endsWith('.md')) continue;
       const file = join(dir, name);
       if (plain(file, 'file')) out.push({ topic: t, slug: name.slice(0, -3), file });

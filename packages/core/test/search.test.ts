@@ -1,4 +1,5 @@
 import {
+  opendirSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -480,9 +481,17 @@ describe('search index (round 4)', () => {
     clearSearchCache();
     h.search('egret');
     expect(searchCacheStats().entries).toBe(4);
-    // Delete two cached notes: their entries go and the two that never fit move in.
-    rmSync(join(rootDir, 'kb', 't', 'note-0.md'));
-    rmSync(join(rootDir, 'kb', 't', 'note-1.md'));
+    // Delete two cached notes: their entries go and the two that never fit move in. Search walks
+    // the folder in the file system's order (sorted on NTFS, hash order on ext4), so the first
+    // two in that order are the cached ones.
+    const topic = join(rootDir, 'kb', 't');
+    const order: string[] = [];
+    const dir = opendirSync(topic);
+    for (let e = dir.readSync(); e; e = dir.readSync()) order.push(e.name);
+    dir.closeSync();
+    for (const name of order.filter((n) => n.endsWith('.md')).slice(0, 2)) {
+      rmSync(join(topic, name));
+    }
     let at = searchCacheStats().loads;
     expect(h.search('egret')).toHaveLength(4);
     expect(searchCacheStats().loads - at).toBe(2);

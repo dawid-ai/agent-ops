@@ -6,9 +6,10 @@ people who use the app are in [UPDATES.md](UPDATES.md); this file lists every ch
 Unreleased changes are in [`changelog.d/`](changelog.d/README.md). `scripts/fold-changelog.mjs` folds
 them in at release time (see [RELEASING.md](RELEASING.md)).
 
-## 0.2.0-beta.4 (2026-11-07)
+## 0.2.0-beta.5 (2026-11-07)
 
-0.2.0-beta.3 was tagged but never published: its release run failed on a test.
+0.2.0-beta.3 and 0.2.0-beta.4 were tagged but never published: their release runs failed on a
+test that assumed a folder lists its files sorted.
 
 ### Added
 
@@ -31,8 +32,6 @@ them in at release time (see [RELEASING.md](RELEASING.md)).
 
 ### Fixed
 
-- Knowledge base notes are read sorted by topic and name on every OS, not in the folder's order,
-  which on Linux is a hash order. Which notes the search cache keeps no longer differs by machine.
 - opsd no longer reads a stray word after "branch" in a review as the branch to merge ("this branch does not touch it"). A `branch <name>` counts only when the repo has that branch; when the approved review names no source, opsd merges the branch an earlier review of the task names.
 - opsd no longer restarts a run every tick when a runtime's runs end with an error at once. After a run ends with an error within 10 seconds, opsd waits 1, 5 and then 15 minutes before the next run of that runtime. After the fourth failure in a row, it posts one message to you in `#general` and tries once an hour until a run works. To try again sooner, pause and resume the runtime in **Settings**, run `ops daemon resume`, restart opsd, or send a chat message. The wait shows in `ops waits` and the usage report.
 

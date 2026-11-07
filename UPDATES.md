@@ -3,7 +3,7 @@
 What changed in each release, for people who use the app. Every change, including the small
 ones, is in [CHANGELOG.md](CHANGELOG.md).
 
-## v0.2.0-beta.4 (2026-11-07)
+## v0.2.0-beta.5 (2026-11-07)
 
 - **Signed-out agents stop cleanly.** When Claude Code or Codex is signed out, opsd stops at the
   first run that cannot sign in and tells you once, with how to sign in. Work for a role such as
