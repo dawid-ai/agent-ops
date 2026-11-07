@@ -159,21 +159,22 @@ const DAY_MS = 86_400_000;
 
 /**
  * The report window from user input: `from` and `to` (dates or ISO times; `to` defaults to
- * now), or the last `days` whole days (1 to 366, default 7).
+ * now), or the last `days` whole days (1 to 366, default 7). `what` names the caller in errors.
  */
 export function reportWindow(
   input: { days?: string | null; from?: string | null; to?: string | null },
   now = Date.now(),
+  what = 'report',
 ): { from: number; to: number } {
   if (input.from || input.to) {
-    if (!input.from) throw new OpsError('report: give from with to', 2);
+    if (!input.from) throw new OpsError(`${what}: give from with to`, 2);
     const from = Date.parse(input.from);
     const to = input.to ? Date.parse(input.to) : now;
     if (Number.isNaN(from) || Number.isNaN(to)) {
-      throw new OpsError('report: use dates such as 2026-11-01 or ISO times', 2);
+      throw new OpsError(`${what}: use dates such as 2026-11-01 or ISO times`, 2);
     }
-    if (!(from < to)) throw new OpsError('report: the window must end after it starts', 2);
-    if (to - from > 366 * DAY_MS) throw new OpsError('report: at most 366 days', 2);
+    if (!(from < to)) throw new OpsError(`${what}: the window must end after it starts`, 2);
+    if (to - from > 366 * DAY_MS) throw new OpsError(`${what}: at most 366 days`, 2);
     return { from, to };
   }
   const raw = input.days ?? '7';

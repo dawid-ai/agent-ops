@@ -121,6 +121,16 @@ closes; **Parked** asks why. Other moves are dimmed with the reason. Every move,
 menu, a board drop or the palette, opens a dialog and changes nothing until you click its button
 there, so no stray pick, drop or Enter closes or reopens a task in your name.
 
+Text that agents and people write shows as Markdown wherever it appears: the task description,
+events and checkpoint in the task panel, Inbox messages, questions, review requests and triage
+questions, Activity, Decisions (question, context, ballot reasons, outcome), Chat, Channels,
+Standups, Knowledge, the Agents view's waiting list, schedule prompts and the task description of
+each repeating task. Headings, lists, code and links render; task ids are links with a status dot
+and `@id` mentions are colored pills. Titles stay one line. In lists (Inbox, Activity, Agents,
+Schedules, Repeating) long text shows its first lines; click it or **Show more** to expand it, and
+again to fold it. See
+[event text](protocol.md#event-text-is-markdown) for how agents write it.
+
 **Chat with the PM**, at the top of the sidebar and in the Inbox, opens **Chat**: one
 conversation with the project's PM (the orchestrator), with no agent to pick. An answer never
 closes it, and it survives a restart of the app. A task of type `question` that an agent answered

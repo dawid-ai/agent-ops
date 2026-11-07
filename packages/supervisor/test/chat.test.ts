@@ -122,10 +122,18 @@ const { Workspace } = await import(${JSON.stringify(pathToFileURL(coreDist).href
 let prompt = '';
 for await (const c of process.stdin) prompt += c;
 fs.appendFileSync(process.env.FAKE_PROMPTS, JSON.stringify(prompt) + '\\n');
-const mode = process.env.FAKE_MODE ?? 'reply';
+const modeFile = process.env.FAKE_MODE_FILE;
+const mode = (modeFile && fs.existsSync(modeFile) ? fs.readFileSync(modeFile, 'utf8').trim() : process.env.FAKE_MODE) ?? 'reply';
 const out = (o) => console.log(JSON.stringify(o));
 const delta = (text) => out({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
 out({ type: 'system', subtype: 'init', session_id: 'x' });
+if (mode === 'auth') {
+  // What Claude Code prints when its OAuth session expired (AO-0150).
+  const text = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+  out({ type: 'assistant', message: { id: 'm0', model: '<synthetic>', content: [{ type: 'text', text }] }, error: 'authentication_failed', is_api_error_message: true });
+  out({ type: 'result', is_error: true, result: text });
+  process.exit(1);
+}
 out({ type: 'stream_event', event: { type: 'message_start' } });
 if (mode === 'fail') {
   out({ type: 'result', is_error: true, result: 'No conversation found' });
@@ -143,7 +151,9 @@ else {
 }
 `;
 
-function setup(opts: { mode?: string; opsd?: Record<string, unknown> } = {}) {
+function setup(
+  opts: { mode?: string; opsd?: Record<string, unknown>; env?: Record<string, string> } = {},
+) {
   const repo = temp();
   execFileSync('git', ['init', '-q'], { cwd: repo, windowsHide: true });
   initRoot(repo, { name: 'test', human: 'human:dawid' });
@@ -161,6 +171,7 @@ function setup(opts: { mode?: string; opsd?: Record<string, unknown> } = {}) {
     FAKE_MODE: opts.mode ?? 'reply',
     FAKE_PROMPTS: prompts,
     FAKE_PIDS: pids,
+    ...(opts.env ?? {}),
   } as NodeJS.ProcessEnv;
   delete env.OPS_AGENT;
   delete env.OPS_ROOTS;
@@ -171,7 +182,14 @@ function setup(opts: { mode?: string; opsd?: Record<string, unknown> } = {}) {
       ...(opts.opsd ?? {}),
       // The chat runs on Claude only, so the fake agent stands in for the claude command; it
       // ignores the Claude flags that follow its script.
-      runtimes: { claude: { command: process.execPath, args: [agentFile] } },
+      runtimes: {
+        claude: {
+          command: process.execPath,
+          args: [agentFile],
+          // No sign-in check: `claude auth status` has no stand-in here.
+          sign_in_check: false,
+        },
+      },
     },
   });
   const sup = new Supervisor({
@@ -332,6 +350,61 @@ describe('chat', () => {
     const next = sup.chat.send('again');
     await ended(sup, next.live!.id);
     expect(sent()[1]).toContain('Chat rules');
+  });
+
+  it('starts a turn while the runtime backs off after failed starts (AO-0150)', async () => {
+    const { sup } = setup({ mode: 'fail' });
+    // A run that ends with an error at once puts the runtime in backoff for other runs.
+    const r = sup.launch({ agent: 'claude:orchestrator' });
+    await ended(sup, r.id);
+    expect(sup.blocker('claude:orchestrator', 'test')).toMatch(/within 10 s 1 time\(s\) in a row/);
+    // The human's chat message is a try of its own: it starts a turn instead of waiting.
+    const v = sup.chat.send('hi');
+    expect(v.waiting).toBeFalsy();
+    expect(v.live).toMatchObject({ agent: 'claude:orchestrator', chat: true });
+    await ended(sup, v.live!.id);
+  });
+
+  it('answers that Claude is signed out and sends the messages once it is signed in (AO-0154)', async () => {
+    const modeFile = join(temp(), 'mode');
+    writeFileSync(modeFile, 'auth');
+    const { sup, sent } = setup({ env: { FAKE_MODE_FILE: modeFile } });
+    const v = sup.chat.send('hi');
+    await ended(sup, v.live!.id);
+    expect(sup.signedOut('claude')).toMatchObject({ run: v.live!.id });
+    let view = sup.chat.view();
+    // The message waits instead of failing, and the reply says how to sign in.
+    expect(view.messages).toMatchObject([
+      { role: 'user', text: 'hi', status: 'queued' },
+      { role: 'assistant' },
+    ]);
+    expect(view.messages[1]!.text).toMatch(
+      /^Claude is signed out on this PC, so claude:orchestrator cannot answer yet\. To sign in, run `claude`, then `\/login`\./,
+    );
+    expect(view.messages[1]!.error).toBeUndefined();
+    // More messages wait too, with no second reply and no run.
+    sup.chat.send('second');
+    sup.chat.tick();
+    view = sup.chat.view();
+    expect(view.waiting).toMatch(/claude is signed out/);
+    expect(view.live).toBeNull();
+    expect(view.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    expect(sent()).toHaveLength(1);
+    // Signed in again: one turn reads both messages.
+    writeFileSync(modeFile, 'reply');
+    sup.resumeSignIn('claude');
+    sup.chat.tick();
+    const turn = sup.chat.view().live!;
+    expect(turn).toMatchObject({ chat: true });
+    await ended(sup, turn.id);
+    view = sup.chat.view();
+    expect(view.messages.filter((m) => m.role === 'user').map((m) => m.status)).toEqual([
+      'sent',
+      'sent',
+    ]);
+    expect(view.messages.at(-1)).toMatchObject({ role: 'assistant', text: 'Thinking done.' });
+    expect(sent()[1]).toContain('hi');
+    expect(sent()[1]).toContain('second');
   });
 
   it('continues the chat from channel mentions and keeps them out of inbox wakes', async () => {

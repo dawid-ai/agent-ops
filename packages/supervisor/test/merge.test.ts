@@ -10,6 +10,8 @@ import {
   MERGE_ACTOR,
   mergeSource,
   opsdConfig,
+  pickMergeSource,
+  reviewSources,
   Supervisor,
   systemLister,
 } from '../src/index.js';
@@ -277,6 +279,70 @@ describe('merging approved work', () => {
       branch: 'feature/x',
     });
     expect(mergeSource('PR: https://github.com/o/r/pull/1')).toBeNull();
+  });
+
+  it('takes a loose branch word only when the repo has that branch, else an earlier review (AO-0153)', () => {
+    const branches = new Set(['claude/ao-0148-speed', 'claude/ao-0147-speed']);
+    const has = {
+      branch: (b: string) => branches.has(b),
+      commit: (c: string) => c === 'ca2b7d9b',
+    };
+    // Prose from the AO-0148 and AO-0147 reviews that named a stray word as the branch.
+    const prose148 =
+      'AO-0148: the failure came from the PC sleeping, not from the branch, and the same commits ' +
+      'rebased onto v2 pass. I did not force-push the rebase: the rebased branch is local.';
+    const prose147 =
+      'AO-0147: the merge failed on a file this branch does not touch; commit it on ' +
+      'claude/ao-0147-speed or directly on v2.';
+    expect(reviewSources(prose148)).toEqual({ loose: ['is'] });
+    expect(reviewSources(prose147)).toEqual({ loose: ['does'] });
+    const older148 = 'AO-0148: ca2b7d9b on branch claude/ao-0148-speed (pushed) moves the tests.';
+    const older147 = 'AO-0147: f14a8416 + f441744d on branch claude/ao-0147-speed make it fast.';
+    // The branch an earlier review names, at its tip: it holds what the last review describes.
+    expect(pickMergeSource([prose148, older148], has)).toEqual({ branch: 'claude/ao-0148-speed' });
+    expect(pickMergeSource([prose147, older147], has)).toEqual({ branch: 'claude/ao-0147-speed' });
+    // A stray word alone merges nothing.
+    expect(pickMergeSource([prose148], has)).toBeNull();
+    // A loose name that is a branch still counts, after the stray ones.
+    expect(pickMergeSource(['this branch does; see branch claude/ao-0148-speed.'], has)).toEqual({
+      branch: 'claude/ao-0148-speed',
+    });
+    // The newest review's `<commit> on branch <name>` stands as it is, even when the repo lacks
+    // it: opsd tells the human instead of merging older work.
+    expect(pickMergeSource(['abc1234 on branch gone', older148], has)).toEqual({
+      commit: 'abc1234',
+      branch: 'gone',
+    });
+    // An earlier review whose branch is gone counts by its commit.
+    expect(pickMergeSource([prose148, 'ca2b7d9b on branch deleted-one'], has)).toEqual({
+      commit: 'ca2b7d9b',
+      branch: 'deleted-one',
+    });
+  });
+
+  it('merges the branch an earlier review names when the approved review names none (AO-0153)', async () => {
+    const s = mergeSetup();
+    const first = s.branch('two\n');
+    const eng = s.as('fake:engineer');
+    eng.start('1', 'plan');
+    eng.review('1', `${first.slice(0, 7)} on branch feature: changes the code`, 'human:dawid');
+    s.as('human:dawid').verdict('1', 'changes', 'one more line');
+    // The fix lands on the branch; the next review names no source, only prose.
+    const block = git(s.repo, 'worktree', 'list', '--porcelain')
+      .split(/\r?\n\r?\n/)
+      .find((b) => b.includes('branch refs/heads/feature'))!;
+    const wt = /^worktree (.+)$/m.exec(block)![1]!.trim();
+    writeFileSync(join(wt, 'code.txt'), 'two\nthree\n');
+    git(wt, 'commit', '-qam', 'One more line');
+    const tip = git(wt, 'rev-parse', 'HEAD');
+    eng.start('1', 'fix');
+    eng.review('1', 'Added the line; this branch is ready and the tests pass.', 'human:dawid');
+    s.as('human:dawid').verdict('1', 'approve', 'looks right');
+    await s.merged();
+    const e = s.last();
+    expect(e).toMatchObject({ type: 'merge', actor: MERGE_ACTOR, branch: 'feature' });
+    expect(git(s.repo, 'rev-parse', 'main')).toBe(tip);
+    expect(text(join(s.repo, 'code.txt'))).toBe('two\nthree\n');
   });
 
   it('rebases onto the base, runs the checks, fast-forwards the base, builds and records it', async () => {

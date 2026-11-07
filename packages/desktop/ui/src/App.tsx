@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SetupStatus } from './api';
-import { bridge, refreshSoon, useData, useUpdate } from './api';
+import { api, bridge, refreshSoon, useData, useUpdate } from './api';
 import { Avatar, Toaster, cx } from './components';
 import { Lightbox } from './ui/attach';
 import type { SavedView } from './lib/filters';
@@ -38,7 +38,7 @@ import { useMover } from './ui/move';
 import { Palette, ShortcutHelp } from './ui/palette';
 import { setRefTasks } from './lib/refs';
 import { useRefTasks, useTaskFocus } from './ui/refs';
-import type { Decision, InboxItem, Info, RunRecord, Task } from './types';
+import type { Decision, InboxItem, Info, ProviderUsage, RunRecord, SignedOut, Task } from './types';
 import { Activity as ActivityView } from './views/Activity';
 import { AddAgentDialog, Agents } from './views/Agents';
 import { Board } from './views/Board';
@@ -268,7 +268,7 @@ export function App() {
     const offs = [
       b.onEvent((m) => {
         const ev = (m as { event: string }).event;
-        if (ev === 'tasks' || ev === 'changed' || ev === 'run' || ev === 'sync') refreshSoon();
+        if (['tasks', 'changed', 'run', 'sync', 'signin'].includes(ev)) refreshSoon();
       }),
       b.onStatus((m) => {
         setStatus(m as Status);
@@ -302,6 +302,11 @@ export function App() {
   const live = useData<RunRecord[]>(info ? '/api/runs?live' : null);
   const votes = useData<Decision[]>(info ? '/api/decisions' : null);
   const tasks = useData<Task[]>(info ? '/api/tasks' : null);
+  // Signed-out providers (AO-0154): a banner on every view until each is signed in again.
+  const usage = useData<Record<string, ProviderUsage>>(info ? '/api/usage' : null);
+  const signedOut = Object.entries(usage.data ?? {}).flatMap(([p, u]) =>
+    u.signed_out ? [[p, u.signed_out] as const] : [],
+  );
   const [saved, setSaved] = useState<SavedView[]>(() => loadViews());
   useEffect(() => {
     const reload = (): void => setSaved(loadViews());
@@ -537,6 +542,9 @@ export function App() {
         )}
       </aside>
       <main className="stage flex min-w-0 flex-1 flex-col">
+        {signedOut.map(([p, s]) => (
+          <SignedOutBanner key={p} provider={p} state={s} onResumed={usage.reload} />
+        ))}
         {update?.status === 'ready' && (
           <div className="flex items-center gap-3 border-b border-signal/25 bg-signal/8 px-6 py-2 text-sm text-signal">
             <Download size={16} />
@@ -647,6 +655,72 @@ export function App() {
           onClose={() => setAddAgent(null)}
         />
       )}
+    </div>
+  );
+}
+
+/** Text with `code` spans, such as a provider's sign-in steps. */
+function CodeText({ text }: { text: string }) {
+  return (
+    <>
+      {text.split('`').map((part, i) =>
+        i % 2 === 1 ? (
+          <code key={i} className="rounded bg-white/8 px-1 font-mono text-[12px]">
+            {part}
+          </code>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
+/**
+ * A provider is signed out (AO-0154): no run of it starts until the person signs in. opsd checks
+ * by itself; **Resume** tries at once, for after the person signed in.
+ */
+function SignedOutBanner(props: { provider: string; state: SignedOut; onResumed: () => void }) {
+  const { provider, state } = props;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const resume = (): void => {
+    setBusy(true);
+    setError(null);
+    api('POST', '/api/signin/resume', { provider }).then(
+      () => {
+        setBusy(false);
+        props.onResumed();
+        refreshSoon();
+      },
+      (e: Error) => {
+        setBusy(false);
+        setError(e.message);
+      },
+    );
+  };
+  return (
+    <div
+      data-signed-out={provider}
+      className="flex items-center gap-3 border-b border-warn/25 bg-warn/8 px-6 py-2 text-sm text-warn"
+    >
+      <TriangleAlert size={16} />
+      <span className="min-w-0 flex-1">
+        <b>{provider}</b> is signed out on this PC, so no {provider} run starts. To sign in,{' '}
+        <CodeText text={state.steps} />.{' '}
+        {state.check
+          ? 'opsd checks every few minutes and starts its runs again by itself.'
+          : 'opsd tries one run an hour.'}{' '}
+        Click Resume after you sign in to start at once.
+        {error && <span className="ml-1 text-bad">{error}</span>}
+      </span>
+      <button
+        onClick={resume}
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-md bg-warn/15 px-2.5 py-1 text-xs font-medium hover:bg-warn/25 disabled:opacity-50"
+      >
+        <RefreshCw size={13} /> Resume
+      </button>
     </div>
   );
 }

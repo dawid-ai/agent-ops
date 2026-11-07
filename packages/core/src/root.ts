@@ -20,7 +20,8 @@ import { ulid, ulidAfter } from './ulid.js';
 // 5: task states carry waitEvent. 6: task states carry the resolved project; `p` stamps it.
 // 7: task states carry lastReview.
 // 8: an assign with keep_wait keeps the task blocked; older builds folded it to todo.
-const INDEX_VERSION = 8;
+// 9: addressed events carry their whole body as `detail` when it is longer than the summary.
+const INDEX_VERSION = 9;
 
 interface IndexEntry {
   tm: number;

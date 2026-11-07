@@ -17,6 +17,7 @@ const ALLOWED: Record<'GET' | 'POST', RegExp[]> = {
     `runs/${SEG}/log`,
     `runs/${SEG}/procs`,
     'waits',
+    'usage',
     'settings',
     'schedules',
     'repeats',
@@ -54,6 +55,7 @@ const ALLOWED: Record<'GET' | 'POST', RegExp[]> = {
     'attachments',
     'chat',
     'chat/(stop|reset)',
+    'signin/resume',
   ].map((p) => new RegExp(`^/api/${p}$`)),
 };
 

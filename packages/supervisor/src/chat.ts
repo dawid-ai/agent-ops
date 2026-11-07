@@ -6,6 +6,7 @@ import {
   messagesSince,
   OpsError,
   ownerMatches,
+  runtimeOf,
   secretKind,
   ulid,
   ulidTimePrefix,
@@ -13,6 +14,7 @@ import {
 import type { RunRecord } from './runs.js';
 import type { ChatPromptMessage } from './runtimes.js';
 import { chatPrompt } from './runtimes.js';
+import { signInSteps } from './signin.js';
 import type { Supervisor } from './supervisor.js';
 
 /** One line of the chat: a message to the agent, its reply, or a note from opsd. */
@@ -58,6 +60,10 @@ interface ChatState {
   cwd?: string;
   /** The live turn's run. */
   run?: string;
+  /** The live turn started `session`; a turn that could not sign in leaves none to resume. */
+  fresh?: boolean;
+  /** When the runtime's signed-out spell the chat last said so for began, in ms (AO-0154). */
+  signed_out?: number;
   messages: ChatMessage[];
   /** Per root, the newest channel message already read for mentions. */
   markers: Record<string, string>;
@@ -376,9 +382,11 @@ export class Chat {
     }
     const ws = this.host.ws(this.agent);
     const cwd = this.host.checkoutOf(ws, this.agent);
-    const why = this.host.blocker(this.agent, this.host.projectOf(ws), { cwd });
+    // The same limits `launch` checks for a chat turn: no checkout hold and no runtime backoff.
+    const why = this.host.blocker(this.agent, this.host.projectOf(ws), { cwd, chat: true });
     if (why) {
-      if (why !== this.waitReason) {
+      const told = this.tellSignedOut(s);
+      if (why !== this.waitReason || told) {
         this.waitReason = why;
         this.emitChange();
       }
@@ -421,9 +429,35 @@ export class Chat {
     s.run = r.id;
     s.session = session;
     s.cwd = cwd;
+    if (resume) delete s.fresh;
+    else s.fresh = true;
     this.write(s);
     this.watch(r);
     this.emitChange();
+  }
+
+  /**
+   * While the chat's runtime is signed out, says so once per signed-out spell, with how to sign
+   * in (AO-0154). Queued messages wait and go out once it is signed in again. True if it wrote
+   * the reply.
+   */
+  private tellSignedOut(s: ChatState): boolean {
+    const provider = runtimeOf(this.agent);
+    const out = this.host.signedOut(provider);
+    if (!out || s.signed_out === out.since) return false;
+    s.signed_out = out.since;
+    const name = provider.charAt(0).toUpperCase() + provider.slice(1);
+    s.messages.push({
+      id: ulid(this.now()),
+      role: 'assistant',
+      at: new Date(this.now()).toISOString(),
+      text:
+        `${name} is signed out on this PC, so ${this.agent} cannot answer yet. To sign in, ` +
+        `${signInSteps(provider)}. Your messages wait here and go out once ${provider} is signed ` +
+        'in again: opsd checks by itself, or click **Resume** in the banner after you sign in.',
+    });
+    this.write(s);
+    return true;
   }
 
   private watch(r: RunRecord): void {
@@ -482,6 +516,21 @@ export class Chat {
     const s = this.read();
     if (s.run !== r.id) return;
     delete s.run;
+    const fresh = s.fresh;
+    delete s.fresh;
+    // The turn could not sign in (AO-0154): its messages wait for the sign-in instead of failing.
+    if (this.host.signedOut(runtimeOf(this.agent))?.run === r.id) {
+      for (const m of s.messages) {
+        if (m.run !== r.id || m.role !== 'user') continue;
+        m.status = 'queued';
+        delete m.run;
+      }
+      if (fresh) delete s.session;
+      this.tellSignedOut(s);
+      this.write(s);
+      this.emitChange();
+      return;
+    }
     const text = turn.reader.text;
     let error: string | undefined;
     if (r.reason === 'stopped') error = 'stopped';

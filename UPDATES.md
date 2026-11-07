@@ -3,6 +3,20 @@
 What changed in each release, for people who use the app. Every change, including the small
 ones, is in [CHANGELOG.md](CHANGELOG.md).
 
+## v0.2.0-beta.3 (2026-11-07)
+
+- **Signed-out agents stop cleanly.** When Claude Code or Codex is signed out, opsd stops at the
+  first run that cannot sign in and tells you once, with how to sign in. Work for a role such as
+  `*:engineer` moves to the other provider meanwhile, and runs start again once you sign in.
+- **No more restart loops.** A runtime whose runs fail at once waits 1, 5 and then 15 minutes
+  before the next try, instead of starting a run every tick.
+- **Messages read as written.** The Inbox, Activity, Decisions and the task panel show event text
+  as Markdown, with its line breaks, and the Inbox shows the whole message.
+- **Faster sync.** `ops sync` starts fewer git processes, which matters most on Windows.
+- **Fixes.** opsd merges the branch a review names, and no longer mistakes a stray word after
+  "branch" for one. `ops doctor` warns when a user-level copy of the `agent-ops` skill is out of
+  date.
+
 ## v0.2.0-beta.2 (2026-11-05)
 
 - **Repeating tasks.** Set a task to come back daily, weekly, on chosen weekdays, monthly or

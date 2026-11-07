@@ -6,6 +6,32 @@ people who use the app are in [UPDATES.md](UPDATES.md); this file lists every ch
 Unreleased changes are in [`changelog.d/`](changelog.d/README.md). `scripts/fold-changelog.mjs` folds
 them in at release time (see [RELEASING.md](RELEASING.md)).
 
+## 0.2.0-beta.3 (2026-11-07)
+
+### Added
+
+- `ops doctor` (and **Settings** health checks) warns when a user-level copy of the `agent-ops` skill in `~/.claude/skills`, `~/.codex/skills` or `~/.agents/skills` differs from the skill this install ships, names the sections it lacks, and says which file to copy over it. Claude Code and Codex load those copies in place of the repo copy, so a stale one hides new guidance from agent runs.
+- The desktop app ships the `agent-ops` skill in `resources/app/skills/agent-ops/` for that comparison.
+- `GET /api/timeline` returns a project's or root's history as a replay timeline: lanes per agent, work spans, review rounds, waits on answers, runs with tokens, decisions, learn notes and closed tasks, with totals for stat cards and a time map that plays idle stretches fast. The data comes from the task events already in the store.
+
+### Changed
+
+- `ops sync` starts fewer git processes: a sync with nothing to send runs 4 instead of 10, and
+  mirroring a project root into the Master Repo reads each side's pushed files once instead of once
+  per task. Syncs are faster on Windows, where each git process costs tens of milliseconds.
+- The desktop app renders event text as Markdown in the Inbox (messages, questions, review requests, triage questions), Activity, Decisions, the task panel checkpoint, the Agents waiting list, schedule prompts and repeating task descriptions. Long text in lists shows its first lines and expands on a click.
+- The Inbox shows the whole message, question or mention, not only its first line: inbox items carry the full text as `detail`.
+- Every `ops` command that takes a message reads it from stdin with a lone `-` as well as with `--body-file -`, and keeps its newlines; `--body-file` turns Windows line ends into `\n`.
+- `ops show` prints a multi-line event body with its lines kept, indented under the event, instead of joining them into one line.
+- The `agent-ops` skill and `AGENTS.md` ask agents to write event text as a summary line and short bullets for done, open and next, with one example per finishing command.
+- When Claude Code or Codex is signed out, opsd stops at the first run that cannot sign in. It starts no more runs of that provider, chat turns included, and tells you once: in your inbox, as a desktop notification and as a banner in the app, with how to sign in (`claude`, then `/login`; `codex login`) and which reviews wait. It checks the sign-in every 3 minutes with `claude auth status` or `codex login status`, which call no model, and starts runs again once you signed in; **Resume** in the banner or `ops daemon resume` starts them at once. opsd also checks each sign-in when it starts.
+- While a provider is signed out, work for a role group such as `*:engineer` goes to the next provider. Work sent back to an agent of the signed-out provider by name goes to the same role on another provider after 15 minutes (`opsd.signed_out_handoff_minutes`). The chat answers with how to sign in, and your messages wait until you do. `ops usage`, `ops waits` and the app show "signed out" as the reason work waits.
+
+### Fixed
+
+- opsd no longer reads a stray word after "branch" in a review as the branch to merge ("this branch does not touch it"). A `branch <name>` counts only when the repo has that branch; when the approved review names no source, opsd merges the branch an earlier review of the task names.
+- opsd no longer restarts a run every tick when a runtime's runs end with an error at once. After a run ends with an error within 10 seconds, opsd waits 1, 5 and then 15 minutes before the next run of that runtime. After the fourth failure in a row, it posts one message to you in `#general` and tries once an hour until a run works. To try again sooner, pause and resume the runtime in **Settings**, run `ops daemon resume`, restart opsd, or send a chat message. The wait shows in `ops waits` and the usage report.
+
 ## 0.2.0-beta.2 (2026-11-05)
 
 ### Added

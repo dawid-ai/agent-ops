@@ -51,6 +51,7 @@ import { renderMarkdown } from '../lib/markdown';
 import { findEvent, mergeEvents, pairAnswers, writtenReducer } from '../lib/thread';
 import { moveTo, shownStatus } from '../lib/transitions';
 import type { OpsEvent, Status, Task, TaskDetail } from '../types';
+import { Markdown } from '../ui/markdown';
 import { useMover } from '../ui/move';
 import type { Due } from '../ui/pickers';
 import { AgentPicker, DuePicker, dueToApi, MentionArea, Menu, useDirectory } from '../ui/pickers';
@@ -269,12 +270,10 @@ export function TaskPanel({
           {t?.checkpoint && (
             <div className="mt-3 rounded-xl border border-info/20 bg-info/6 p-3 text-sm">
               <div className="label-caps !text-info">Checkpoint · {ago(t.checkpoint.at)}</div>
-              <div className="mt-1 whitespace-pre-wrap text-fg-2">
-                <RefText text={t.checkpoint.summary} />
-              </div>
+              <Markdown text={t.checkpoint.summary} className="md-tight mt-1 text-fg-2" />
               {t.checkpoint.next && (
                 <div className="mt-1 text-fg-3">
-                  Next: <RefText text={t.checkpoint.next} />
+                  Next: <Markdown inline text={t.checkpoint.next} />
                 </div>
               )}
             </div>

@@ -46,7 +46,7 @@ import {
   writeBallot,
   writeOutcome,
 } from './decisions.js';
-import { derive, isClaimable, summaryLine } from './fold.js';
+import { derive, detailText, isClaimable, summaryLine } from './fold.js';
 import {
   assertActor,
   assertOwner,
@@ -66,6 +66,8 @@ import { readNotes, searchNotes, writeNote } from './kb.js';
 import type { RootedPost, SearchHit, SearchResult } from './search.js';
 import { parseQuery, runSearch, wantedKinds } from './search.js';
 import { searchBudget, searchSources } from './search-index.js';
+import type { Timeline, TimelineTask } from './timeline.js';
+import { buildTimeline } from './timeline.js';
 import type { OpsEvent, Priority, Status, TaskMeta, TaskView } from './model.js';
 import { OPEN_STATUSES, PRIORITIES } from './model.js';
 import type {
@@ -247,7 +249,10 @@ export interface InboxItem {
   summary: string;
   /** When the event behind the item was written: the review request, for a review. */
   at?: string;
-  /** review: the full request text; `summary` is its first line. */
+  /**
+   * The full text (cut to 4000 characters) when it says more than `summary`, its first line: a
+   * review request, message, question or channel mention. The inbox renders it as Markdown.
+   */
   detail?: string;
   /** review: the pull request, commit and branch the request names. */
   pr?: string;
@@ -257,7 +262,7 @@ export interface InboxItem {
   owner?: string;
   priority?: string;
   /** triage: an open question to the person, answered together with Accept. */
-  question?: { event: string; from: string; summary: string };
+  question?: { event: string; from: string; summary: string; detail?: string };
 }
 
 /** The pull request, commit and branch a review request names, for a link in the inbox. */
@@ -278,10 +283,12 @@ export function reviewRefs(text: string): { pr?: string; commit?: string; branch
 /** The open question a blocked task waits on, if the ask or block addressed someone. */
 export function openQuestion(
   v: TaskView,
-): { event: string; from: string; to: string; summary: string } | undefined {
+): { event: string; from: string; to: string; summary: string; detail?: string } | undefined {
   if (v.status !== 'blocked' || v.blockedOn.length > 0 || !v.waitEvent) return undefined;
   const a = v.addressed.find((x) => x.event === v.waitEvent);
-  return a ? { event: a.event, from: a.actor, to: a.to, summary: a.summary } : undefined;
+  if (!a) return undefined;
+  const { event, actor: from, to, summary, detail } = a;
+  return { event, from, to, summary, ...(detail !== undefined ? { detail } : {}) };
 }
 
 /** A finding a person has not yet accepted, set aside or parked. */
@@ -1255,7 +1262,9 @@ export class Workspace {
     assertOwner(to);
     const res = this.act(ref, (v, ctx) => {
       ctx.requireOpen('hand off');
-      ctx.needOwnerOrHolder();
+      // opsd hands unclaimed work of a signed-out provider to another provider (AO-0154).
+      const byOpsd = !!this.actor && runtimeOf(this.actor) === 'opsd';
+      if (!(byOpsd && !v.claimedBy)) ctx.needOwnerOrHolder();
       if (v.meta.type === QUESTION_TYPE) assertQuestionTo(to, v.meta.created_by, ctx.actor);
       this.checkTarget(ctx, to, 'new owner');
       return [{ type: 'handoff', to, body: message }];
@@ -1761,6 +1770,55 @@ export class Workspace {
    */
   activityPage(opts: ActivityOptions = {}): ActivityPage {
     return activityPage(this.roots, opts);
+  }
+
+  /**
+   * The replay timeline (see `buildTimeline`) of every root, or of `root`, narrowed to `project`
+   * when given, for the window `from` to `to` (ms; `to` defaults to now). Archived tasks count.
+   * A closed task whose last event is more than a day before `from` is not read: the day covers
+   * events that sync placed after newer ones.
+   */
+  timeline(
+    opts: {
+      root?: string;
+      project?: string;
+      from?: number;
+      to?: number;
+      maxGapMs?: number;
+      clipMs?: number;
+    } = {},
+  ): Timeline {
+    const to = opts.to ?? this.now();
+    const roots = opts.root ? this.roots.filter((r) => r.name === opts.root) : this.scopedRoots();
+    if (opts.root && roots.length === 0) throw new OpsError(`no root named '${opts.root}'`, 2);
+    const tasks: TimelineTask[] = [];
+    const ids = new Set<string>();
+    for (const root of roots) {
+      const project = opts.project ? root.projectName(opts.project) : undefined;
+      for (const s of [...root.states(), ...root.archivedStates()]) {
+        const ref = `${root.name}/${s.meta.id}`;
+        if (ids.has(ref)) continue;
+        if (project !== undefined && s.meta.project !== project) continue;
+        if (Date.parse(s.meta.created_at) >= to) continue;
+        const closed = !OPEN_STATUSES.has(s.status);
+        const quiet = opts.from !== undefined && Date.parse(s.updatedAt) < opts.from - 86_400_000;
+        if (closed && quiet) continue;
+        ids.add(ref);
+        tasks.push({ root: root.name, meta: s.meta, events: root.readEvents(s.meta.id) });
+      }
+    }
+    const names = new Set(roots.map((r) => r.name));
+    const decisions = this.decisions({ all: true }).filter(
+      (d) =>
+        names.has(d.root) &&
+        (!opts.project || (d.meta.task !== undefined && ids.has(`${d.root}/${d.meta.task}`))),
+    );
+    return buildTimeline(tasks, decisions, {
+      from: opts.from,
+      to,
+      maxGapMs: opts.maxGapMs,
+      clipMs: opts.clipMs,
+    });
   }
 
   channels(): ChannelInfo[] {
@@ -2277,6 +2335,7 @@ export class Workspace {
           from: a.actor,
           type: a.type,
           summary: a.summary,
+          ...(a.detail !== undefined ? { detail: a.detail } : {}),
         });
       }
       if (triage) {
@@ -2296,6 +2355,7 @@ export class Workspace {
                   event: question.event,
                   from: question.actor,
                   summary: question.summary,
+                  ...(question.detail !== undefined ? { detail: question.detail } : {}),
                 },
               }
             : {}),
@@ -2311,6 +2371,7 @@ export class Workspace {
           event: question?.event ?? v.waitEvent ?? undefined,
           from: question?.actor,
           summary: question?.summary ?? 'waits for your answer',
+          ...(question?.detail !== undefined ? { detail: question.detail } : {}),
         });
       }
       if (v.status === 'needs-review' && forMe(v.reviewer)) {
@@ -2327,7 +2388,7 @@ export class Workspace {
                 from: req.actor,
                 at: req.at,
                 summary: summaryLine(req.body) || 'waits for your review',
-                ...(summaryLine(req.body) !== req.body ? { detail: req.body } : {}),
+                ...(detailText(req.body) !== undefined ? { detail: detailText(req.body) } : {}),
                 ...reviewRefs(req.body),
               }
             : { summary: 'waits for your review' }),
@@ -2363,6 +2424,7 @@ export class Workspace {
           event: m.id,
           from: m.actor,
           summary: m.body.split('\n')[0] ?? '',
+          ...(detailText(m.body) !== undefined ? { detail: detailText(m.body) } : {}),
         });
       }
     }

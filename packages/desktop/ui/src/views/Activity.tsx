@@ -18,6 +18,7 @@ import {
 import type { Loaded } from '../lib/activity';
 import type { ActivityItem, ActivityPage } from '../types';
 import { FilterChip } from '../ui/filters';
+import { Markdown } from '../ui/markdown';
 import { RefText } from '../ui/refs';
 import { Highlight } from '../ui/search';
 
@@ -275,9 +276,13 @@ function Row({ i, nav, words }: { i: ActivityItem; nav: Nav; words: string[] }) 
             </span>
           )}
           {i.body && (
-            <div className="mt-0.5 line-clamp-2 text-xs text-fg-3">
-              <RefText text={i.body} render={(s) => <Highlight text={s} words={words} />} />
-            </div>
+            <Markdown
+              text={i.body}
+              clamp
+              lines={3}
+              words={words}
+              className="mt-0.5 text-xs text-fg-3"
+            />
           )}
         </div>
         <span className="shrink-0 text-[11px] text-fg-4" title={ago(i.at)}>

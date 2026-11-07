@@ -27,6 +27,23 @@ This repo is the Agent Ops engine, v2. Read [README.md](README.md) and
    in one or two sentences what it is about; and states the decision or action needed. Never
    write "see the comment of <date>". See "Messages to a person" in
    [docs/protocol.md](docs/protocol.md).
+6. Event text is Markdown. Anything longer than a sentence (checkpoints, comments, reviews, asks,
+   handoffs) is a one-line summary that names the task, a blank line, then short bullets for done,
+   open and next, with code font for paths, commands and branches. Pass it on stdin, not as one
+   shell argument, so the line breaks survive:
+
+   ```bash
+   ops review AO-0012 --to codex:reviewer --body-file - <<'EOF'
+   AO-0012: login retries stop after 3 attempts; 3f2a9c1 on branch `ao-0012-login-retry`.
+
+   - Done: retry limit and backoff in `core/auth.ts`
+   - Tests: `npm test` green, 2 new in `core/test/auth.test.ts`
+   - Check: the backoff values in `RETRY_MS`
+   EOF
+   ```
+
+   The `agent-ops` skill has one example per finishing command (`review`, `done`, `handoff`,
+   `ask`, `block`, `release`).
 
 ## Code
 

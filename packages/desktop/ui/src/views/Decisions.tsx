@@ -16,6 +16,7 @@ import {
 } from '../components';
 import { ago } from '../lib/format';
 import type { Decision } from '../types';
+import { Markdown } from '../ui/markdown';
 import { RefText } from '../ui/refs';
 
 export function Decisions({ nav, selected }: { nav: Nav; selected?: string }) {
@@ -170,13 +171,9 @@ function DecisionCard({
       </div>
 
       <h2 className="mt-3 font-display text-lg leading-snug font-semibold tracking-wide">
-        <RefText text={d.meta.question} />
+        <Markdown inline text={d.meta.question} />
       </h2>
-      {d.body && (
-        <div className="mt-1 text-sm whitespace-pre-wrap text-fg-3">
-          <RefText text={d.body} />
-        </div>
-      )}
+      {d.body && <Markdown text={d.body} className="md-tight mt-1 text-sm text-fg-3" />}
 
       <div className="mt-4 flex flex-col gap-2">
         {d.meta.options.map((opt, i) => {
@@ -295,11 +292,7 @@ function DecisionCard({
                   >
                     <RefText text={b.choice} />
                   </span>
-                  {b.body && (
-                    <span className="min-w-0 text-fg-3">
-                      “<RefText text={b.body} />”
-                    </span>
-                  )}
+                  {b.body && <Markdown text={b.body} className="md-tight min-w-0 text-fg-3" />}
                   <span className="ml-auto shrink-0 font-mono text-[10px] text-fg-4">
                     {ago(b.at)}
                   </span>
@@ -329,9 +322,7 @@ function DecisionCard({
             </b>{' '}
             by <Who id={d.outcome.decided_by} /> {ago(d.outcome.at)}
             {d.outcome.body && (
-              <span className="text-fg-3">
-                : <RefText text={d.outcome.body} />
-              </span>
+              <Markdown text={d.outcome.body} className="md-tight mt-1 text-fg-3" />
             )}
           </div>
         </div>

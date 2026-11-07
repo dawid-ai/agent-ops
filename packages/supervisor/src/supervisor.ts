@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { freemem } from 'node:os';
 import { closeSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
-import { delimiter, dirname, join, relative, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve } from 'node:path';
 import type { AgentDef, Priority, Root, Route, TaskView, UserConfig } from '@agent-ops/core';
 import type { SyncResult } from '@agent-ops/core';
 import {
@@ -42,7 +42,7 @@ import {
 import { Checkout, leftoverBranch } from './checkout.js';
 import type { MergeConfig, OpsdConfig, ScheduleConfig } from './config.js';
 import type { CommandResult, CommandWatch, MergeSource } from './merge.js';
-import { CommandRunner, MergeRepo, mergeSource } from './merge.js';
+import { CommandRunner, MergeRepo, pickMergeSource } from './merge.js';
 import type { NotifyItem } from './notify.js';
 import { BranchPusher, gitError } from './push.js';
 import { dropEnv, runEnv } from './runenv.js';
@@ -51,6 +51,7 @@ import { opsdConfig, roleLimits, stateDir } from './config.js';
 import type { ProviderUsage, UsageState } from './quota.js';
 import {
   claudeUsage,
+  clock,
   codexHome,
   codexUsage,
   findRollout,
@@ -76,6 +77,8 @@ import { Chat } from './chat.js';
 import type { ChatInvocation, QuestionPrompt } from './runtimes.js';
 import { invocation, runPrompt, withStoreCheckoutRule } from './runtimes.js';
 import { UsageMeter } from './usage.js';
+import type { SignInAnswer } from './signin.js';
+import { runSignInCheck, SIGN_IN_CHECK_TIMEOUT_MS, SIGN_IN_CHECKS, signInSteps } from './signin.js';
 
 /** Most referenced tasks a question's prompt lists; the agent reads more with `ops show`. */
 const QUESTION_REFS = 20;
@@ -189,6 +192,117 @@ export const DIRTY_ACTOR = 'opsd:checkout';
 /** Who gives ownerless work a role group as its owner (AO-0140). */
 export const ROUTE_ACTOR = 'opsd:router';
 const DIRTY_CHANNEL = 'general';
+/** Who tells the human that a runtime's runs keep failing at once, such as on a sign-in (AO-0150). */
+export const RUNTIME_ACTOR = 'opsd:runtime';
+/** A run that ends with an error this soon after it started counts as a failed start. */
+export const FAST_FAIL_MS = 10_000;
+/** Minutes before the next run of a runtime after 1, 2 and 3 failed starts in a row. */
+export const BACKOFF_MINUTES = [1, 5, 15] as const;
+/**
+ * After this many failed starts in a row, opsd tells the human once and starts a run of that
+ * runtime only once an hour, until a run works again.
+ */
+export const BACKOFF_STOP = BACKOFF_MINUTES.length + 1;
+export const BACKOFF_STOPPED_MINUTES = 60;
+
+/** Failed starts in a row of one runtime, and when its next run may start. */
+interface RuntimeBackoff {
+  failures: number;
+  until: number;
+  /** The human was told this runtime stopped. */
+  told: boolean;
+}
+
+/** Minutes between sign-in checks of a signed-out provider (AO-0154). */
+export const SIGN_IN_CHECK_MINUTES = 3;
+/** Without a sign-in check opsd can use, a signed-out provider gets one run this often. */
+export const SIGNED_OUT_TRY_MINUTES = 60;
+/**
+ * A run that cannot sign in this soon after a sign-in check said "signed in" makes opsd stop
+ * trusting that check: it may only look for stored credentials, not whether they still work.
+ */
+const CHECK_DOUBT_MS = 30 * 60_000;
+/**
+ * Providers whose runs cannot commit in a task's linked worktree yet: its git folder is outside
+ * Codex's sandbox (AO-0155). opsd does not hand them work that has one.
+ */
+const NO_WORKTREE_COMMIT = new Set(['codex']);
+/** The file in the state folder that keeps each provider's `SignInState`. */
+export const SIGN_IN_FILE = 'signin.json';
+
+/** A provider opsd saw signed out (AO-0154). */
+export interface SignedOut {
+  /** When opsd saw it, in ms. */
+  since: number;
+  /** The run that could not sign in; none when a sign-in check found it. */
+  run?: string;
+  /** That run's task, as `root/id`. */
+  task?: string;
+  /** The human was told. */
+  told: boolean;
+  /**
+   * No sign-in check can tell: none is set, its answer cannot be read, or it said "signed in"
+   * while runs still could not sign in. opsd then starts one run an hour instead.
+   */
+  no_check?: boolean;
+  /** When the next sign-in check, or with `no_check` the next run, is due, in ms. */
+  next: number;
+}
+
+/** What `signin.json` in the state folder keeps per provider. */
+export interface SignInState {
+  /** Set while the provider is signed out. */
+  out?: SignedOut;
+  /** How the last signed-out spell ended, and whether the human was told of it. */
+  cleared?: { at: number; by: 'check' | 'run' | 'resume'; told: boolean };
+  /** The provider's sign-in check said "signed in" while runs still could not sign in. */
+  check_unreliable?: boolean;
+}
+
+/** A signed-out provider as `GET /api/usage`, `ops usage` and the app's banner show it. */
+export interface SignedOutView {
+  since: string;
+  run?: string;
+  task?: string;
+  /** How to sign in again, such as "run `codex login`". */
+  steps: string;
+  /** opsd checks the sign-in with the CLI's status command; false: one run an hour tries it. */
+  check: boolean;
+  /** When the next check or try is due. */
+  next: string;
+}
+
+/** One provider in `usageReport`. */
+export type ProviderReport = ProviderUsage & {
+  paused: string | null;
+  live: number;
+  signed_out?: SignedOutView;
+};
+
+export function signedOutView(provider: string, out: SignedOut): SignedOutView {
+  return {
+    since: new Date(out.since).toISOString(),
+    ...(out.run ? { run: out.run } : {}),
+    ...(out.task ? { task: out.task } : {}),
+    steps: signInSteps(provider),
+    check: !out.no_check,
+    next: new Date(out.next).toISOString(),
+  };
+}
+
+/** Why work of a signed-out provider waits, for `ops waits`, `ops usage` and the app. */
+export function signedOutText(provider: string, out: SignedOut, now = Date.now()): string {
+  const next = !out.no_check
+    ? `opsd checks every ${SIGN_IN_CHECK_MINUTES} min and starts its runs once it is signed in`
+    : out.next > now
+      ? `opsd starts one ${provider} run to try the sign-in at ${clock(out.next)}`
+      : `opsd starts one ${provider} run to try the sign-in once none is live`;
+  return (
+    `${provider} is signed out since ${clock(out.since)}: ${signInSteps(provider)}; ${next}, ` +
+    'or resume it in the app or with `ops daemon resume`'
+  );
+}
+
 /** Rebase, check and fast-forward rounds before a merge gives up on a base that keeps moving. */
 const MERGE_ATTEMPTS = 5;
 /** Pause between those rounds. */
@@ -416,6 +530,22 @@ export class Supervisor extends EventEmitter {
   private closed = false;
   private readonly freeMem: () => number;
   private usage: UsageState;
+  /**
+   * Per runtime, its failed starts in a row (AO-0150). Kept in memory: a restart of opsd tries
+   * the runtime again.
+   */
+  private readonly backoff = new Map<string, RuntimeBackoff>();
+  /**
+   * Per provider, whether it is signed out (AO-0154). Kept in `signin.json`, so a restart neither
+   * tells the human again nor forgets it, and `ops usage` reads it without opsd.
+   */
+  private signIn: Record<string, SignInState>;
+  /** Providers whose sign-in check runs now. */
+  private readonly signInChecking = new Set<string>();
+  /** The sign-in checks running now, which `close` waits for. */
+  private readonly signInRuns = new Set<Promise<SignInAnswer>>();
+  /** Providers whose first sign-in check after opsd started has not answered yet. */
+  private readonly startChecks = new Set<string>();
   /** Whether live runs keep going after this opsd exits; see `RUNS_OUTLIVE_OPSD`. */
   readonly runsOutlive: boolean;
   /** The desktop chat with the orchestrator; each turn is a run under the usual limits. */
@@ -449,6 +579,7 @@ export class Supervisor extends EventEmitter {
     this.version = opts.version;
     this.runsOutlive = opts.runsOutlive ?? RUNS_OUTLIVE_OPSD;
     this.usage = this.store.readJson<UsageState>('usage.json', {});
+    this.signIn = this.store.readJson<Record<string, SignInState>>(SIGN_IN_FILE, {});
     this.chat = new Chat(this, this.now);
   }
 
@@ -464,6 +595,17 @@ export class Supervisor extends EventEmitter {
   reloadConfig(): void {
     const user = readUserConfig(this.env);
     const cfg = opsdConfig(user);
+    // Resuming opsd or a runtime in Settings tries a stopped or signed-out runtime again at once
+    // (AO-0150, AO-0154).
+    for (const p of new Set([...this.backoff.keys(), ...Object.keys(this.signIn)])) {
+      if (
+        (this.cfg.paused && !cfg.paused) ||
+        (this.cfg.runtimes[p]?.paused && !cfg.runtimes[p]?.paused)
+      ) {
+        this.backoff.delete(p);
+        this.clearSignedOut(p, 'resume');
+      }
+    }
     this.user = user;
     this.cfg = { ...cfg, port: this.cfg.port, tick_seconds: this.cfg.tick_seconds };
   }
@@ -603,6 +745,9 @@ export class Supervisor extends EventEmitter {
     const rc = this.config.runtimes[provider];
     if (!rc) return noProvider(provider);
     if (rc.paused) return `${provider} is paused in Settings`;
+    // Signed out: every run of the provider fails, chat turns and helpers too (AO-0154).
+    const signedOut = this.signedOutPause(provider, live);
+    if (signedOut) return signedOut;
     if (rc.max_live !== undefined) {
       const n = live.filter((r) => runtimeOf(r.agent) === provider).length;
       if (n >= rc.max_live) return `${n} ${provider} runs live; max_live is ${rc.max_live}`;
@@ -614,6 +759,9 @@ export class Supervisor extends EventEmitter {
       this.now(),
     );
     if (paused) return paused;
+    // The human sends a chat turn: it tries the runtime whatever its failed starts.
+    const backoff = opts.chat ? null : this.backoffPause(provider);
+    if (backoff) return backoff;
     // A helper works under its parent's claim and scope: role limits count the parent only.
     if (opts.child) return null;
     // A question run answers and writes nothing: project and checkout limits are for work.
@@ -767,22 +915,342 @@ export class Supervisor extends EventEmitter {
     return ws.roots[0]?.projectName() ?? 'default';
   }
 
-  /** What opsd knows about each provider's usage allowance, with whether it pauses new runs. */
-  usageReport(): Record<string, ProviderUsage & { paused: string | null; live: number }> {
-    const out: Record<string, ProviderUsage & { paused: string | null; live: number }> = {};
+  /**
+   * What opsd knows about each provider's usage allowance, with whether it pauses new runs, and
+   * whether it is signed out (AO-0154).
+   */
+  usageReport(): Record<string, ProviderReport> {
+    const out: Record<string, ProviderReport> = {};
     const providers = new Set([...Object.keys(this.config.runtimes), ...Object.keys(this.usage)]);
+    const live = this.liveRecords();
     for (const p of providers) {
       const u = this.usage[p] ?? { windows: {}, updated_at: 0 };
       const pauseAt = this.config.runtimes[p]?.pause_at ?? this.config.usage_pause_at;
+      const so = this.signIn[p]?.out;
       out[p] = {
         ...u,
         paused: this.config.runtimes[p]?.paused
           ? `${p} is paused in Settings`
-          : usagePause(p, this.usage[p], pauseAt, this.now()),
-        live: this.liveRecords().filter((r) => runtimeOf(r.agent) === p).length,
+          : (this.signedOutPause(p, live) ??
+            usagePause(p, this.usage[p], pauseAt, this.now()) ??
+            this.backoffPause(p)),
+        live: live.filter((r) => runtimeOf(r.agent) === p).length,
+        ...(so ? { signed_out: signedOutView(p, so) } : {}),
       };
     }
     return out;
+  }
+
+  // ---- Signed out (AO-0154) --------------------------------------------------------------------
+
+  /** The provider's signed-out state, or null while it is signed in. */
+  signedOut(provider: string): SignedOut | null {
+    return this.signIn[provider]?.out ?? null;
+  }
+
+  private saveSignIn(): void {
+    this.store.writeJson(SIGN_IN_FILE, this.signIn);
+    this.emit('signin');
+  }
+
+  /**
+   * Why no run of the provider starts now because it is signed out, or null. Without a sign-in
+   * check opsd can use, one run an hour may start to try the sign-in, when none of the provider
+   * is live or planned (`live`).
+   */
+  private signedOutPause(provider: string, live: PlannedRun[]): string | null {
+    if (this.startChecks.has(provider)) return `opsd checks whether ${provider} is signed in`;
+    const out = this.signIn[provider]?.out;
+    if (!out) return null;
+    if (
+      out.no_check &&
+      this.now() >= out.next &&
+      !live.some((r) => runtimeOf(r.agent) === provider)
+    ) {
+      return null;
+    }
+    return signedOutText(provider, out, this.now());
+  }
+
+  /** The status command that checks the provider's sign-in, or null when it has none. */
+  private signInCheck(provider: string): { file: string; args: string[] } | null {
+    const rc = this.config.runtimes[provider];
+    if (!rc || rc.sign_in_check === false) return null;
+    const check = rc.sign_in_check ?? SIGN_IN_CHECKS[provider];
+    const file = check ? resolveCommand(rc.command, this.env) : null;
+    // `args` go first, as for a run: a wrapped runtime such as `wsl claude` checks the wrapped CLI.
+    return check && file ? { file, args: [...(rc.args ?? []), ...check] } : null;
+  }
+
+  /**
+   * Notes that the provider is signed out: from a run that could not sign in, or from a sign-in
+   * check. opsd starts no run of it until it is signed in again. The human hears of it once:
+   * after the sign-in check that follows a failed run says how opsd resumes.
+   */
+  private markSignedOut(provider: string, how: 'run' | 'check', r?: RunRecord): void {
+    const now = this.now();
+    const st = (this.signIn[provider] ??= {});
+    if (st.out) {
+      // A trial run, or one that was live before, could not sign in either.
+      if (st.out.no_check) st.out.next = now + SIGNED_OUT_TRY_MINUTES * 60_000;
+      this.saveSignIn();
+      return;
+    }
+    // The check said "signed in" a moment ago, and a run still could not sign in.
+    const doubt = st.cleared?.by === 'check' && now - st.cleared.at < CHECK_DOUBT_MS;
+    if (doubt && how === 'run') st.check_unreliable = true;
+    const noCheck = !this.signInCheck(provider) || st.check_unreliable === true;
+    st.out = {
+      since: now,
+      ...(r ? { run: r.id } : {}),
+      ...(r?.task && r.root ? { task: `${r.root}/${r.task}` } : {}),
+      // The same spell as the one a check ended a moment ago: the human already knows.
+      told: doubt ? (st.cleared?.told ?? false) : false,
+      ...(noCheck ? { no_check: true } : {}),
+      next: now + (noCheck ? SIGNED_OUT_TRY_MINUTES : SIGN_IN_CHECK_MINUTES) * 60_000,
+    };
+    delete st.cleared;
+    this.backoff.delete(provider);
+    this.saveSignIn();
+    this.emit(
+      'warn',
+      `${provider} is signed out${r ? ` (run ${r.id} could not sign in)` : ''}; no new ${provider} runs until it is signed in`,
+    );
+    // After a failed run, the check runs first, so the notice says how opsd goes on.
+    if (how === 'run' && !noCheck) void this.checkSignIn(provider);
+    else this.tellSignedOut(provider);
+  }
+
+  /** Ends the provider's signed-out state; true if it was signed out. */
+  private clearSignedOut(provider: string, by: 'check' | 'run' | 'resume'): boolean {
+    const st = this.signIn[provider];
+    if (!st?.out) return false;
+    st.cleared = { at: this.now(), by, told: st.out.told };
+    delete st.out;
+    this.saveSignIn();
+    const how = { check: 'its sign-in check says so', run: 'a run worked', resume: 'resumed' }[by];
+    this.emit('warn', `${provider} is signed in again (${how}); its runs start again`);
+    return true;
+  }
+
+  /**
+   * Starts runs of signed-out providers again, or of `provider` only: the app's **Resume** and
+   * `ops daemon resume`. Clears failed-start waits too. Returns the providers it resumed.
+   */
+  resumeSignIn(provider?: string): string[] {
+    const names = provider ? [provider] : Object.keys(this.signIn);
+    const resumed = names.filter((p) => this.clearSignedOut(p, 'resume'));
+    for (const p of provider ? [provider] : [...this.backoff.keys()]) this.backoff.delete(p);
+    return resumed;
+  }
+
+  /**
+   * Runs the provider's sign-in check, which sends no prompt, and acts on its answer. Checks run
+   * one at a time per provider; never throws.
+   */
+  async checkSignIn(provider: string): Promise<void> {
+    if (this.signInChecking.has(provider)) return;
+    const check = this.signInCheck(provider);
+    let answer: SignInAnswer = 'unknown';
+    this.signInChecking.add(provider);
+    try {
+      if (check) {
+        const env = runEnv(this.env, {});
+        dropEnv(env, this.config.runtimes[provider]?.unset_env ?? []);
+        // `stop` ends the check; `close` waits for it.
+        const running = runSignInCheck(
+          check.file,
+          check.args,
+          env,
+          SIGN_IN_CHECK_TIMEOUT_MS,
+          this.stopAbort.signal,
+        );
+        this.signInRuns.add(running);
+        try {
+          answer = await running;
+        } finally {
+          this.signInRuns.delete(running);
+        }
+      }
+    } finally {
+      this.signInChecking.delete(provider);
+      this.startChecks.delete(provider);
+    }
+    if (this.stopping || this.closed) return;
+    this.safe(() => this.takeSignInAnswer(provider, answer));
+  }
+
+  private takeSignInAnswer(provider: string, answer: SignInAnswer): void {
+    const st = this.signIn[provider];
+    const out = st?.out;
+    const now = this.now();
+    if (answer === 'out') {
+      if (!out) return this.markSignedOut(provider, 'check');
+      out.next = now + SIGN_IN_CHECK_MINUTES * 60_000;
+      this.saveSignIn();
+      return this.tellSignedOut(provider);
+    }
+    if (!out) return;
+    if (answer === 'in' && !st.check_unreliable) {
+      this.clearSignedOut(provider, 'check');
+      return;
+    }
+    // No answer opsd can use: one run an hour tries the sign-in instead.
+    if (!out.no_check) {
+      out.no_check = true;
+      out.next = now + SIGNED_OUT_TRY_MINUTES * 60_000;
+      this.saveSignIn();
+    }
+    this.tellSignedOut(provider);
+  }
+
+  /** Each tick: checks the sign-in of each signed-out provider whose check is due. */
+  private signInTick(): void {
+    const now = this.now();
+    for (const [p, st] of Object.entries(this.signIn)) {
+      const out = st.out;
+      if (!out || out.no_check || now < out.next) continue;
+      out.next = now + SIGN_IN_CHECK_MINUTES * 60_000;
+      void this.checkSignIn(p);
+    }
+  }
+
+  /**
+   * At start: checks the sign-in of each provider an agent runs on, and starts none of its runs
+   * until the check answers, so an expired session does not start a burst of failing runs.
+   */
+  private startSignInChecks(): void {
+    const agents = [...Object.keys(this.config.agents), this.config.chat.agent];
+    for (const p of Object.keys(this.config.runtimes)) {
+      if (!agents.some((a) => runtimeOf(a) === p) || !this.signInCheck(p)) continue;
+      this.startChecks.add(p);
+      void this.checkSignIn(p);
+    }
+  }
+
+  /**
+   * Tells the human once per signed-out spell, in their inbox (a mention, which the desktop app
+   * shows as a notification) and through the app's banner: which provider, how to sign in, how
+   * opsd resumes, and which reviews wait for it.
+   */
+  private tellSignedOut(provider: string): void {
+    const out = this.signIn[provider]?.out;
+    if (!out || out.told) return;
+    out.told = true;
+    this.saveSignIn();
+    this.safe(() => {
+      const ws = this.ws(RUNTIME_ACTOR);
+      const human = this.user.me ?? ws.roots[0]?.config.human;
+      if (!human) return;
+      const how = out.run
+        ? `run ${out.run}${out.task ? ` on ${out.task}` : ''} could not sign in`
+        : 'its sign-in check says so';
+      const resume = out.no_check
+        ? `opsd cannot check the sign-in without a run, so it starts one ${provider} run an hour, next at ${clock(out.next)}`
+        : `opsd checks the sign-in every ${SIGN_IN_CHECK_MINUTES} minutes and starts ${provider} runs again by itself`;
+      const reviews = ws
+        .list()
+        .filter(
+          (v) =>
+            v.status === 'needs-review' &&
+            v.reviewer !== null &&
+            !isHuman(v.reviewer) &&
+            runtimeOf(v.reviewer) === provider,
+        )
+        .map((v) => v.meta.id);
+      const text =
+        `${provider} is signed out on this PC: ${how}. opsd starts no ${provider} runs until you ` +
+        `sign in again: ${signInSteps(provider)}. ${resume}; to resume now, click **Resume** in ` +
+        'the app or run `ops daemon resume`.' +
+        (reviews.length > 0 ? ` Reviews that wait for ${provider}: ${reviews.join(', ')}.` : '');
+      ws.post(DIRTY_CHANNEL, text, { to: [human], task: out.task });
+    });
+  }
+
+  /**
+   * Hands a task owned by name by an agent of a signed-out provider, such as the author a review
+   * sent back, to the same role on another provider once the provider has been signed out for
+   * `signed_out_handoff_minutes`. Work that has a worktree goes to no provider that cannot
+   * commit there (AO-0155). Work owned by `*:<role>` needs none of this: the wake plan already
+   * passes over a signed-out provider.
+   */
+  private signedOutHandoffs(): void {
+    const minutes = this.config.signed_out_handoff_minutes;
+    if (minutes <= 0) return;
+    const now = this.now();
+    const grace = minutes * 60_000;
+    const out = new Map<string, number>();
+    for (const [p, st] of Object.entries(this.signIn)) {
+      if (st.out && now - st.out.since >= grace) out.set(p, st.out.since);
+    }
+    if (out.size === 0) return;
+    const ws = this.ws(RUNTIME_ACTOR);
+    const waking = this.wakingAgents().filter((a) => !roleInactive(ws.agent(a)));
+    const live = this.liveRecords();
+    for (const v of ws.list()) {
+      const owner = v.owner;
+      if (v.status !== 'todo' || v.claimedBy || !owner || isHuman(owner) || isWildcard(owner))
+        continue;
+      const from = runtimeOf(owner);
+      const since = out.get(from);
+      if (since === undefined) continue;
+      // The grace counts from when this task began to wait: a send-back to the signed-out
+      // provider's agent waits its full grace too.
+      const todoAt = v.todoSince ? Date.parse(v.todoSince) : NaN;
+      if (Number.isFinite(todoAt) && now - todoAt < grace) continue;
+      if (live.some((r) => r.root === v.root && r.task === v.meta.id)) continue;
+      const role = roleOf(owner);
+      const worktree = this.taskWorktree(ws, v);
+      const reviewer = v.delegation?.review;
+      const order = roleLimits(this.config, role).providers;
+      const rank = (a: string): number => {
+        const i = order.indexOf(runtimeOf(a));
+        return i < 0 ? order.length : i;
+      };
+      const to = waking
+        .filter((a) => roleOf(a) === role && runtimeOf(a) !== from)
+        .filter((a) => !this.signIn[runtimeOf(a)]?.out)
+        .filter((a) => !(worktree && NO_WORKTREE_COMMIT.has(runtimeOf(a))))
+        .filter((a) => !(reviewer && !isHuman(reviewer) && runtimeOf(reviewer) === runtimeOf(a)))
+        .sort((a, b) => rank(a) - rank(b))[0];
+      if (!to) continue;
+      const where = worktree
+        ? `Its work is on branch \`${worktree.branch ?? '(detached HEAD)'}\` in the worktree \`${worktree.path}\`.`
+        : 'opsd found no worktree for it; its events name the branch, if any.';
+      const note =
+        `${v.meta.id}: ${from} is signed out on this PC since ${clock(since)}, so ${owner} cannot ` +
+        `work on it; opsd hands it to ${to} after ${minutes} min. ${where} Go on from the ` +
+        'latest checkpoint and comments.';
+      this.safe(() => {
+        ws.handoff(`${v.root}/${v.meta.id}`, to, note);
+        this.emit(
+          'warn',
+          `${v.root}/${v.meta.id}: handed from ${owner} to ${to}; ${from} is signed out`,
+        );
+      });
+    }
+  }
+
+  /** The linked worktree a task's work is in (`out/wt-<id>` or a branch naming the id), or null. */
+  private taskWorktree(ws: Workspace, v: TaskView): { path: string; branch: string | null } | null {
+    const root = ws.roots.find((r) => r.name === v.root);
+    const top = root ? this.gitTopOf(resolve(root.dir)) : null;
+    if (!top) return null;
+    let list: Array<{ path: string; branch: string | null }>;
+    try {
+      list = this.checkout(top).worktrees();
+    } catch {
+      return null;
+    }
+    const id = v.meta.id.toLowerCase();
+    return (
+      list.find(
+        (w) =>
+          !samePath(w.path, top) &&
+          (basename(w.path).toLowerCase().includes(id) ||
+            (w.branch ?? '').toLowerCase().includes(id)),
+      ) ?? null
+    );
   }
 
   /** Takes new usage readings from a run's output into the usage state. */
@@ -814,6 +1282,82 @@ export class Supervisor extends EventEmitter {
     if (!reading) return;
     this.usage[provider] = mergeUsage(this.usage[provider], reading);
     this.store.writeJson('usage.json', this.usage);
+  }
+
+  /** Why no new run of the provider starts now after its failed starts, or null (AO-0150). */
+  private backoffPause(provider: string): string | null {
+    const b = this.backoff.get(provider);
+    if (!b || b.until <= this.now()) return null;
+    return (
+      `${provider} runs ended with an error within ${FAST_FAIL_MS / 1000} s ${b.failures} ` +
+      `time(s) in a row; next try at ${clock(b.until)}`
+    );
+  }
+
+  /**
+   * A run that could not sign in puts its provider in the signed-out state (AO-0154). A run that
+   * ended with an error within `FAST_FAIL_MS` counts as a failed start of its runtime, and opsd
+   * waits longer before each next run (AO-0150); without this, an expired sign-in made opsd
+   * start and release a run every tick for hours. A run that works clears the count, and the
+   * signed-out state when it started after it. A usage limit has its own pause (`readUsage`) and
+   * counts as neither. A chat turn can fail at once on its own session, so it never counts as a
+   * failed start.
+   */
+  private noteRunHealth(l: LiveRun, r: RunRecord): void {
+    if (l.meter.limitHits > 0 || r.reason === 'lost') return;
+    const provider = runtimeOf(r.agent);
+    if (l.meter.authFailed) {
+      this.markSignedOut(provider, 'run', r);
+      return;
+    }
+    const ms = Date.parse(r.ended_at ?? r.started_at) - Date.parse(r.started_at);
+    const quick = ms < FAST_FAIL_MS;
+    if (!(r.reason === 'exit' && r.exit !== 0 && quick && !r.chat)) {
+      // A run stopped soon after its start, such as by a person, says nothing either way.
+      if (r.exit === 0 || !quick) {
+        this.backoff.delete(provider);
+        const out = this.signIn[provider]?.out;
+        // A run that was live before the sign-in failed proves nothing about it now.
+        if (out && Date.parse(r.started_at) >= out.since) this.clearSignedOut(provider, 'run');
+      }
+      return;
+    }
+    const prev = this.backoff.get(provider);
+    const failures = (prev?.failures ?? 0) + 1;
+    const stopped = failures >= BACKOFF_STOP;
+    const minutes = stopped ? BACKOFF_STOPPED_MINUTES : BACKOFF_MINUTES[failures - 1]!;
+    const b: RuntimeBackoff = {
+      failures,
+      until: this.now() + minutes * 60_000,
+      told: prev?.told ?? false,
+    };
+    this.backoff.set(provider, b);
+    this.emit(
+      'warn',
+      `run ${r.id}: ${provider} ended with exit ${r.exit ?? '-'} after ${ms} ms; no new ${provider} runs until ${clock(b.until)}`,
+    );
+    if (stopped && !b.told) {
+      b.told = true;
+      this.tellStopped(provider, b, r);
+    }
+  }
+
+  /** Tells the human once that a runtime's runs keep failing at once, and what to do. */
+  private tellStopped(provider: string, b: RuntimeBackoff, r: RunRecord): void {
+    this.safe(() => {
+      const ws = this.ws(RUNTIME_ACTOR);
+      const human = this.user.me ?? ws.roots[0]?.config.human;
+      if (!human) return;
+      const task = r.task && r.root ? `${r.root}/${r.task}` : undefined;
+      const what = `ended with an error within ${FAST_FAIL_MS / 1000} s ${b.failures} times in a row`;
+      const fix = `Check the log of run ${r.id} with \`ops logs ${r.id}\``;
+      const text =
+        `${task ?? 'opsd'}: ${provider} runs ${what}; the last was run ${r.id}. ` +
+        `opsd starts the next ${provider} run at ${clock(b.until)}, then once an hour until one ` +
+        `works. ${fix}; to try again sooner, pause and resume ${provider} in Settings or ` +
+        `restart opsd.`;
+      ws.post(DIRTY_CHANNEL, text, { to: [human], task });
+    });
   }
 
   runs(opts: { live?: boolean } = {}): RunRecord[] {
@@ -1083,6 +1627,12 @@ export class Supervisor extends EventEmitter {
       launch: spawned.launch,
     };
     this.live.set(id, liveRun);
+    // A signed-out provider without a sign-in check: this run is its try for the next hour.
+    const signedOut = this.signIn[runtime]?.out;
+    if (signedOut?.no_check) {
+      signedOut.next = this.now() + SIGNED_OUT_TRY_MINUTES * 60_000;
+      this.saveSignIn();
+    }
     child.on('exit', (code) => this.finish(id, code));
     if (spawned.launch) void this.handOver(liveRun, spawned.launch, prompt);
     else {
@@ -1214,6 +1764,7 @@ export class Supervisor extends EventEmitter {
     r.exit = l.killReason ? null : exit;
     r.reason = l.killReason ?? (l.child ? 'exit' : 'lost');
     r.tokens = l.meter.tokens;
+    this.noteRunHealth(l, r);
     // Saved with the end, so an opsd that stops before the wrap-up is over resumes it.
     r.wrap_up = 'pending';
     this.store.save(r);
@@ -1886,6 +2437,7 @@ export class Supervisor extends EventEmitter {
 
   start(): void {
     this.adopt();
+    this.safe(() => this.startSignInChecks());
     this.safe(() => this.chat.resume());
     void this.sweep();
     this.timer = setInterval(() => void this.tick(), this.config.tick_seconds * 1000);
@@ -1957,6 +2509,8 @@ export class Supervisor extends EventEmitter {
     while (this.ending.size > 0 && Date.now() < wrapped) await sleep(50);
     await this.merging?.done;
     await this.procChain;
+    // `stop` aborted them; each ends at once.
+    await Promise.all([...this.signInRuns]);
     this.closed = true;
     this.lister?.close();
     this.lister = undefined;
@@ -1974,6 +2528,9 @@ export class Supervisor extends EventEmitter {
       this.safe(() => this.mergeTick());
       this.dirtyHolds = new Map();
       try {
+        this.safe(() => this.signInTick());
+        // Before wake, so work handed over from a signed-out provider starts this tick.
+        if (!this.stopping) this.safe(() => this.signedOutHandoffs());
         this.runSchedules();
         // Before wake, so a task a repeat creates now can start this tick.
         this.safe(() => this.runRepeats());
@@ -2404,15 +2961,24 @@ export class Supervisor extends EventEmitter {
     if (!verdict || verdict.verdict !== 'approve' || verdict.actor === MERGE_ACTOR) return null;
     if (verdict.at < since) return null;
     if (events.slice(at + 1).some((e) => e.actor === MERGE_ACTOR)) return null;
-    const review = events
+    const reviews = events
       .slice(0, at)
       .reverse()
-      .find((e) => e.type === 'review');
-    const src = review ? mergeSource(review.body) : null;
-    if (!review || !src) return null;
+      .filter((e) => e.type === 'review');
+    const review = reviews[0];
+    if (!review) return null;
     const root = ws.resolve(ref).root;
     const top = cfg.checkout ? resolve(cfg.checkout) : this.gitTopOf(resolve(root.dir));
     if (!top) return null;
+    const repo = new MergeRepo(top, '', [], this.commandEnv());
+    const src = pickMergeSource(
+      reviews.map((e) => e.body),
+      {
+        branch: (name) => repo.commit(`refs/heads/${name}`) !== null,
+        commit: (sha) => repo.commit(sha) !== null,
+      },
+    );
+    if (!src) return null;
     const what = src.commit
       ? `${src.commit} on branch ${src.branch}`
       : `branch ${src.branch ?? '?'}`;

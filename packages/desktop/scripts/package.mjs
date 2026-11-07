@@ -64,6 +64,8 @@ await build({
 
 cpSync(join(desktop, 'dist', 'preload.cjs'), join(stage, 'preload.cjs'));
 cpSync(join(desktop, 'dist', 'ui'), join(stage, 'ui'), { recursive: true });
+// The agent-ops skill beside the bundles: `ops doctor` compares user-level copies with it.
+cpSync(join(top, 'skills', 'agent-ops'), join(stage, 'skills', 'agent-ops'), { recursive: true });
 
 writeFileSync(
   join(stage, 'package.json'),

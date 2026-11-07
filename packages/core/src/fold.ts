@@ -14,6 +14,15 @@ export function summaryLine(body: string): string {
   return line.length > SUMMARY_LEN ? `${line.slice(0, SUMMARY_LEN - 1)}…` : line;
 }
 
+/**
+ * The whole event body, trimmed and cut to `REVIEW_LEN`, when it says more than its summary
+ * line: the inbox renders it as Markdown (AO-0143). Undefined for a one-line body.
+ */
+export function detailText(body: string): string | undefined {
+  const text = body.trim();
+  return summaryLine(text) === text ? undefined : text.slice(0, REVIEW_LEN);
+}
+
 function eventTime(e: OpsEvent): number {
   return Date.parse(e.at) || ulidTime(e.id);
 }
@@ -58,10 +67,12 @@ export function fold(meta: TaskMeta, events: OpsEvent[]): TaskState {
     lastReview: null,
     lostClaims: [],
     delegation: null,
+    todoSince: meta.created_at,
   };
   if (meta.blocked_by && meta.blocked_by.length > 0) {
     s.status = 'blocked';
     s.blockedOn = [...meta.blocked_by];
+    s.todoSince = null;
   }
 
   const clearClaim = (): void => {
@@ -81,6 +92,7 @@ export function fold(meta: TaskMeta, events: OpsEvent[]): TaskState {
 
   for (const e of sorted) {
     const at = eventTime(e);
+    const before = { status: s.status, owner: s.owner };
     s.lastEvent = e.id;
     s.updatedAt = e.at;
     if (e.to) {
@@ -90,6 +102,7 @@ export function fold(meta: TaskMeta, events: OpsEvent[]): TaskState {
         actor: e.actor,
         to: e.to,
         summary: summaryLine(e.body),
+        ...(detailText(e.body) !== undefined ? { detail: detailText(e.body) } : {}),
       });
     }
     switch (e.type) {
@@ -232,6 +245,8 @@ export function fold(meta: TaskMeta, events: OpsEvent[]): TaskState {
       default:
         break;
     }
+    if (s.status !== 'todo') s.todoSince = null;
+    else if (before.status !== 'todo' || before.owner !== s.owner) s.todoSince = e.at;
   }
   return s;
 }

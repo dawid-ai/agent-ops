@@ -10,17 +10,67 @@ export interface MergeSource {
   branch?: string;
 }
 
+/** A name ends at a space, a colon, a comma, a bracket or a full stop that ends a sentence. */
+const NAME = '`?([A-Za-z0-9._/-]+?)`?(?=[\\s:,;)]|\\.(?:\\s|$)|$)';
+
+/** What a review request names as the work to merge. */
+export interface ReviewSources {
+  /** `<commit> on branch <name>`, the form the agent skill and opsd's own leftover reviews use. */
+  named?: MergeSource;
+  /**
+   * The word after each other `branch`, in order. Prose gives words that are no branch ("this
+   * branch does not touch it"), so only a name that is a branch in the repo counts.
+   */
+  loose: string[];
+}
+
+/** Reads what a review request names: `<commit> on branch <name>`, and each `branch <word>`. */
+export function reviewSources(text: string): ReviewSources {
+  const both = new RegExp(`\\b([0-9a-f]{7,40})\\s+on\\s+branch\\s+${NAME}`, 'm').exec(text);
+  const named = both ? { commit: both[1], branch: both[2] } : undefined;
+  const loose: string[] = [];
+  for (const m of text.matchAll(new RegExp(`\\bbranch\\s+${NAME}`, 'gm'))) {
+    if (m[1] !== named?.branch && !loose.includes(m[1]!)) loose.push(m[1]!);
+  }
+  return named ? { named, loose } : { loose };
+}
+
 /**
- * Reads the branch and commit from a review request: `<commit> on branch <name>`, the form the
- * agent skill and opsd's own leftover reviews use, else `branch <name>` alone (its tip).
+ * Reads the branch and commit from a review request: `<commit> on branch <name>`, else the first
+ * `branch <word>` (its tip). Without a repo to check the word against; see `pickMergeSource`.
  */
 export function mergeSource(text: string): MergeSource | null {
-  // A name ends at a space, a colon, a comma, a bracket or a full stop that ends a sentence.
-  const name = '`?([A-Za-z0-9._/-]+?)`?(?=[\\s:,;)]|\\.(?:\\s|$)|$)';
-  const both = new RegExp(`\\b([0-9a-f]{7,40})\\s+on\\s+branch\\s+${name}`, 'm').exec(text);
-  if (both) return { commit: both[1], branch: both[2] };
-  const branch = new RegExp(`\\bbranch\\s+${name}`, 'm').exec(text);
-  return branch ? { branch: branch[1] } : null;
+  const s = reviewSources(text);
+  return s.named ?? (s.loose[0] ? { branch: s.loose[0] } : null);
+}
+
+/**
+ * Picks what to merge from a task's review requests, newest first, using `has` to check names
+ * against the repo (AO-0153):
+ *
+ * 1. The newest review's `<commit> on branch <name>`, as it is: a commit missing from the repo
+ *    gets a note to the human, not an older commit.
+ * 2. Else the first `branch <word>` in it that is a branch.
+ * 3. Else the newest earlier review that names a branch: that branch's tip, which holds what the
+ *    approved review describes even after a rebase. A commit with no branch left counts as it is.
+ *
+ * Returns null when no review names a branch or commit the repo has.
+ */
+export function pickMergeSource(
+  reviews: string[],
+  has: { branch: (name: string) => boolean; commit: (sha: string) => boolean },
+): MergeSource | null {
+  for (const [i, text] of reviews.entries()) {
+    const s = reviewSources(text);
+    if (i === 0 && s.named) return s.named;
+    if (i > 0 && s.named) {
+      if (has.branch(s.named.branch!)) return { branch: s.named.branch };
+      if (has.commit(s.named.commit!)) return s.named;
+    }
+    const branch = s.loose.find((b) => has.branch(b));
+    if (branch) return { branch };
+  }
+  return null;
 }
 
 /** What one command run printed and how it ended. */

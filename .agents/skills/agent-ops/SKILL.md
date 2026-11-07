@@ -69,6 +69,67 @@ Finish with exactly one of these, then run `ops next` again:
 | Waiting on another task    | `ops block ID "why" --on OTHER`                                 | `blocked`; frees itself when OTHER closes         |
 | Out of time or wrong agent | `ops checkpoint ...`, then `ops release ID "why"`               | back to the queue                                 |
 
+## Writing event text
+
+Event text is Markdown: the app renders it, and `ops show` keeps its lines. Anything longer than a
+sentence goes in this shape:
+
+- One summary line that names the task: what happened or what you need.
+- A blank line, then short bullets: **done**, **open** (what is red or unknown) and **next**.
+- Code font for paths, commands, branches and commits: `` `core/fold.ts` ``, `` `npm test` ``.
+
+A shell argument can't hold line breaks reliably, so pass multi-line text on stdin with
+`--body-file -` (or a lone `-` in place of the message) and a quoted heredoc. In PowerShell, write
+the text to a file and pass `--body-file FILE`. One example per finishing command:
+
+```bash
+ops review AO-0012 --to codex:reviewer --body-file - <<'EOF'
+AO-0012: login retries stop after 3 attempts; 3f2a9c1 on branch `ao-0012-login-retry`.
+
+- Done: retry limit and backoff in `core/auth.ts`
+- Tests: `npm test` green, 2 new in `core/test/auth.test.ts`
+- Check: the backoff values in `RETRY_MS`
+EOF
+
+ops done AO-0013 --body-file - <<'EOF'
+AO-0013: the release notes for 0.3 are in `docs/releases/0.3.md`.
+
+- Covers every fragment in `changelog.d/`
+EOF
+
+ops handoff AO-0014 codex:engineer --body-file - <<'EOF'
+AO-0014: parser done, Windows paths still fail.
+
+- Done: parser and tests in `core/parse.ts`
+- Open: `C:\` paths fail in `parse.test.ts` (3 tests red)
+- Next: normalize separators in `splitPath`
+EOF
+
+ops ask AO-0015 --body-file - <<'EOF'
+AO-0015: which region should the database live in?
+
+- EU: 20% cheaper, same latency for most users
+- US: next to the payment API
+- I recommend EU.
+EOF
+
+ops block AO-0016 --on AO-0012 --body-file - <<'EOF'
+AO-0016: needs the retry limit from AO-0012 before the client can use it.
+
+- Done: client calls stubbed in `web/api.ts`
+EOF
+
+ops release AO-0017 --body-file - <<'EOF'
+AO-0017: needs a macOS machine; this run is on Windows.
+
+- Done: nothing changed
+- Next: an agent on macOS signs the build
+EOF
+```
+
+`ops checkpoint ID --body-file - --next "exact next step"` takes the same shape. Keep titles
+(`ops new`, `ops finding`) to one line.
+
 ## Reviews
 
 - An agent reviewer must come from another provider than you: Claude work goes to a Codex or Cursor

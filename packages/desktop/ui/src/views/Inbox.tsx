@@ -35,6 +35,7 @@ import {
 } from '../components';
 import { ago } from '../lib/format';
 import type { InboxItem } from '../types';
+import { Markdown } from '../ui/markdown';
 import { MentionArea } from '../ui/pickers';
 import { RefText } from '../ui/refs';
 import { TriageActions } from '../ui/triage';
@@ -259,11 +260,17 @@ export function ReviewRequest({ it }: { it: InboxItem }) {
           <span>asks for your review{it.at ? `, ${ago(it.at)}` : ''}</span>
         </div>
       )}
+      {/* The first line until expanded; a click on it, or the button below, shows all of it. */}
       <div
-        className={cx('text-sm whitespace-pre-wrap text-fg-3', !full && 'line-clamp-3')}
+        className={cx('text-sm text-fg-3', it.detail && 'cursor-pointer')}
         data-review-text
+        onClick={(e) => {
+          if (!it.detail || (e.target as Element).closest('a, button, img')) return;
+          if (window.getSelection?.()?.toString()) return;
+          setFull((f) => !f);
+        }}
       >
-        {text}
+        <Markdown text={text} className="md-tight" />
       </div>
       {(it.detail || it.pr || it.commit || it.branch) && (
         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -439,9 +446,7 @@ function Item({ it, g, nav, delay }: { it: InboxItem; g: Group; nav: Nav; delay:
           </div>
         ) : (
           it.summary && (
-            <div className="mt-1.5 line-clamp-3 text-sm whitespace-pre-wrap text-fg-3">
-              <RefText text={it.summary} />
-            </div>
+            <Markdown text={it.detail ?? it.summary} clamp className="mt-1.5 text-sm text-fg-3" />
           )
         )}
         {it.kind === 'ask' && (

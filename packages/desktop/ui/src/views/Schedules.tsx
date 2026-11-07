@@ -19,6 +19,7 @@ import {
 import { ago } from '../lib/format';
 import { identity } from '../lib/identity';
 import type { Schedule } from '../types';
+import { Markdown } from '../ui/markdown';
 import { AgentPicker } from '../ui/pickers';
 import { RefText } from '../ui/refs';
 
@@ -169,9 +170,7 @@ export function Schedules({ nav, selected }: { nav: Nav; selected?: string }) {
                 </div>
               </div>
               {s.prompt && (
-                <div className="line-clamp-2 text-sm text-fg-2">
-                  <RefText text={s.prompt} />
-                </div>
+                <Markdown text={s.prompt} clamp lines={2} className="text-sm text-fg-2" />
               )}
               <div className="flex items-center gap-4 text-xs text-fg-3">
                 <span>

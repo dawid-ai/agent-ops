@@ -14,6 +14,7 @@ import type { PriorityKey } from '../lib/identity';
 import { PRIORITIES, priorityInfo } from '../lib/identity';
 import type { Question } from '../types';
 import { PriorityIcon } from './identity';
+import { Markdown } from './markdown';
 import { AgentPicker, MentionArea, Menu } from './pickers';
 
 /** Whether a task that waits on `waitingOn` waits on `me`; no one named means any person. */
@@ -101,7 +102,11 @@ export function TriageActions({
             <Who id={question.from} label size="xs" />
             <span>asks you</span>
           </div>
-          <div className="mb-2 text-sm whitespace-pre-wrap text-fg-2">{question.summary}</div>
+          <Markdown
+            text={question.detail ?? question.summary}
+            clamp
+            className="mb-2 text-sm text-fg-2"
+          />
           <MentionArea
             value={answer}
             onChange={setAnswer}

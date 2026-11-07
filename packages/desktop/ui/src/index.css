@@ -129,6 +129,25 @@ input[type='time']::-webkit-calendar-picker-indicator {
 .md {
   line-height: 1.55;
 }
+/* Markdown in a heading or sentence (ui/markdown.tsx `inline`). */
+.md-inline {
+  display: inline;
+}
+/* Markdown in a card or list row: no outer margins; folded to a few lines until clicked. */
+.md-tight > :first-child {
+  margin-top: 0;
+}
+.md-tight > :last-child {
+  margin-bottom: 0;
+}
+.md-clamped {
+  max-height: calc(var(--md-lines, 4) * 1.55em);
+  overflow: hidden;
+  cursor: pointer;
+}
+.md-faded {
+  mask-image: linear-gradient(to bottom, black 55%, transparent);
+}
 .md p {
   margin: 0.4rem 0;
 }

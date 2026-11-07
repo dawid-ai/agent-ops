@@ -35,13 +35,16 @@ import {
   ulidTime,
   Workspace,
 } from '@agent-ops/core';
-import type { ProcView, RunRecord, UsageState, WaitItem } from '@agent-ops/supervisor';
+import type { ProcView, RunRecord, SignInState, UsageState, WaitItem } from '@agent-ops/supervisor';
 import {
   buildReport,
   daemonCall,
   doctor,
   formatChecks,
   opsdConfig,
+  SIGN_IN_FILE,
+  signedOutText,
+  signedOutView,
   usagePause,
   readDaemon,
   readTail,
@@ -240,14 +243,24 @@ function list(v: Values[string]): string[] {
   return [];
 }
 
-/** The message: `-m`, `--body-file` (`-` for stdin), or the remaining arguments joined. */
+/** Text from a file, or from stdin for `-`; Windows line ends become `\n`. */
+function readText(ctx: Ctx, file: string): string {
+  const raw =
+    file === '-' ? (ctx.io.readStdin?.() ?? '') : readFileSync(resolve(ctx.io.cwd, file), 'utf8');
+  return raw.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The message, newlines kept as written (AO-0143): `-m`, `--body-file F` (`-` for stdin), a lone
+ * `-` argument for stdin, or the remaining arguments joined by spaces.
+ */
 function message(ctx: Ctx, from: number, required: boolean): string {
   const file = str(ctx.opts['body-file']);
+  const rest = ctx.args.slice(from);
   let text = str(ctx.opts.message);
-  if (file) {
-    text = file === '-' ? (ctx.io.readStdin?.() ?? '') : readFileSync(file, 'utf8');
-  }
-  text ??= ctx.args.slice(from).join(' ');
+  if (file) text = readText(ctx, file);
+  else if (text === undefined && rest.length === 1 && rest[0] === '-') text = readText(ctx, '-');
+  text ??= rest.join(' ');
   if (required && !text.trim()) usageError('a message is required');
   return text;
 }
@@ -255,7 +268,7 @@ function message(ctx: Ctx, from: number, required: boolean): string {
 /** A body from `-m` or `--body-file` only, for commands whose arguments are a title. */
 function bodyText(ctx: Ctx): string {
   const file = str(ctx.opts['body-file']);
-  if (file) return file === '-' ? (ctx.io.readStdin?.() ?? '') : readFileSync(file, 'utf8');
+  if (file) return readText(ctx, file);
   return str(ctx.opts.message) ?? '';
 }
 
@@ -550,12 +563,7 @@ const COMMANDS: Record<string, Command> = {
     },
     run: (ctx) => {
       const title = ctx.args.join(' ');
-      const file = str(ctx.opts['body-file']);
-      const body = file
-        ? file === '-'
-          ? (ctx.io.readStdin?.() ?? '')
-          : readFileSync(file, 'utf8')
-        : (str(ctx.opts.message) ?? '');
+      const body = bodyText(ctx);
       const ws = ctx.ws();
       const owner = str(ctx.opts.to);
       const { meta, proposed } = ws.addTask({
@@ -679,11 +687,13 @@ const COMMANDS: Record<string, Command> = {
                   : e.type === 'merge' && e.commit
                     ? ` ${e.commit.slice(0, 7)} into ${e.into ?? '?'}`
                     : '';
-        const text = e.body.trim().replace(/\n+/g, ' ');
+        // A multi-line body (Markdown) keeps its lines, indented under the event line.
+        const [first = '', ...more] = e.body.trim().split('\n');
         const id = ctx.opts.ids ? `${e.id}  ` : '';
         o(
-          `${id}${e.at.slice(0, 16).replace('T', ' ')}  ${pad(e.actor, 18)} ${e.type}${extra}${to}${text ? `: ${text}` : ''}`,
+          `${id}${e.at.slice(0, 16).replace('T', ' ')}  ${pad(e.actor, 18)} ${e.type}${extra}${to}${first ? `: ${first}` : ''}`,
         );
+        for (const line of more) o(line.trim() ? `    ${line.trimEnd()}` : '');
       }
       if (files.length) {
         o('\nattachments:');
@@ -1309,6 +1319,11 @@ const COMMANDS: Record<string, Command> = {
         const info = readDaemon(env);
         // A running opsd reads the file again at once; a stopped one starts in this state.
         if (info) await daemonCall(info, 'POST', '/api/settings', { patch: {} });
+        // Resume also starts runs of a signed-out provider again (AO-0154); an older opsd has no
+        // such route, and a stopped one checks each sign-in when it starts.
+        if (info && !paused) {
+          await daemonCall(info, 'POST', '/api/signin/resume', {}).catch(() => undefined);
+        }
         ctx.io.out(
           paused ? 'opsd paused: no new runs or schedules start; live runs finish' : 'opsd resumed',
         );
@@ -1342,18 +1357,22 @@ const COMMANDS: Record<string, Command> = {
     run: (ctx) => {
       const store = new RunStore(stateDir(ctx.io.env));
       const usage = store.readJson<UsageState>('usage.json', {});
+      const signIn = store.readJson<Record<string, SignInState>>(SIGN_IN_FILE, {});
       const cfg = opsdConfig(ctx.ws().user);
       const live = store.list().filter((r) => r.status === 'running');
       const now = Date.now();
       const report = Object.fromEntries(
         [...new Set([...Object.keys(cfg.runtimes), ...Object.keys(usage)])].map((p) => {
           const pauseAt = cfg.runtimes[p]?.pause_at ?? cfg.usage_pause_at;
+          const out = signIn[p]?.out;
           return [
             p,
             {
               ...(usage[p] ?? { windows: {} }),
               live: live.filter((r) => r.agent.startsWith(`${p}:`)).length,
-              paused: usagePause(p, usage[p], pauseAt, now),
+              // Signed out first: no run of it starts, whatever its allowance (AO-0154).
+              paused: out ? signedOutText(p, out, now) : usagePause(p, usage[p], pauseAt, now),
+              ...(out ? { signed_out: signedOutView(p, out) } : {}),
             },
           ];
         }),
@@ -1363,8 +1382,9 @@ const COMMANDS: Record<string, Command> = {
         const windows = Object.entries(u.windows)
           .map(([name, w]) => `${name} ${Math.round(w.utilization * 100)}%`)
           .join(', ');
+        const label = 'signed_out' in u ? 'SIGNED OUT' : 'PAUSED';
         ctx.io.out(
-          `${pad(p, 8)} ${u.live} live  ${windows || 'no reading yet'}${u.paused ? `  PAUSED: ${u.paused}` : ''}`,
+          `${pad(p, 8)} ${u.live} live  ${windows || 'no reading yet'}${u.paused ? `  ${label}: ${u.paused}` : ''}`,
         );
       }
     },

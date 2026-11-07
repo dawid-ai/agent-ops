@@ -79,7 +79,7 @@ Two rules need the clock or other tasks, and `ops` applies them when it reads:
 | `assign ID TO`, `priority ID P`, `park ID MSG`, `reopen ID`        | Housekeeping.                                                                                                                                                                                                                                                                                                                                                                 |
 | `sync [--pull] [--push] [--auto] [--session-end]`                  | Commits the root, then pulls and pushes.                                                                                                                                                                                                                                                                                                                                      |
 | `leaks PATH...`                                                    | Scans files for keys, tokens and webhook URLs.                                                                                                                                                                                                                                                                                                                                |
-| `doctor [--json]`                                                  | Checks this machine: user config, data roots and their upstreams, the opsd config, each runtime on PATH and signed in (sign-in files are checked for, never read), opsd and its build, free memory and disk. Exit 1 when a check fails.                                                                                                                                       |
+| `doctor [--json]`                                                  | Checks this machine: user config, data roots and their upstreams, the opsd config, each runtime on PATH and signed in (sign-in files are checked for, never read), user-level copies of the `agent-ops` skill (`~/.claude`, `~/.codex`, `~/.agents`) against the one this install ships, opsd and its build, free memory and disk. Exit 1 when a check fails.                 |
 | `report [--days N] [--from DATE [--to DATE]] [--post CHANNEL]`     | Tasks opened and closed per project, runs and tokens per agent and provider, decisions, over the last N whole days (default 7) or a date range; `--post` sends the summary to a channel, for example from a weekly schedule.                                                                                                                                                  |
 | `master [PATH] [--off]`                                            | Prints, sets or clears the Agent Ops Master Repo in the user config.                                                                                                                                                                                                                                                                                                          |
 | `mirror on [--root NAME]`, `mirror off`                            | Mirrors this project root into the Master Repo, or stops (`mirror:` in its `config.yml`).                                                                                                                                                                                                                                                                                     |
@@ -255,6 +255,33 @@ clears it). Types that change state:
 `finding`, `learn`, `run-start`, `run-end`, `merge`) are history. Unknown types are kept and
 ignored, so older `ops` versions read newer data. opsd writes `merge` events, and the `changes`
 verdict that sends back approved work it could not merge, as `opsd:merge`.
+
+### Event text is Markdown
+
+The body of an event, a channel post, a ballot or a decision is Markdown, and every reader shows
+it as such: the desktop app renders it (sanitized, task ids as links), and `ops show` prints each
+extra line indented under its event. Every command that takes a message reads it, newlines kept,
+from one of:
+
+- `-m TEXT`: the text as given; in a shell, a quoted argument can hold line breaks.
+- `--body-file FILE`: the file's text; Windows line ends become `\n`.
+- `--body-file -`, or a lone `-` in place of the message: standard input.
+- The remaining arguments, joined with spaces: one line.
+
+Text longer than a sentence follows one shape: a summary line that names the task, a blank line,
+then short bullets for done, open and next, with code font for paths, commands and branches:
+
+```bash
+ops checkpoint AO-0012 --next "add the backoff test" --body-file - <<'EOF'
+AO-0012: retry limit works; backoff untested.
+
+- Done: limit of 3 in `core/auth.ts`
+- Open: no test for `RETRY_MS`
+EOF
+```
+
+An inbox item carries the first line as `summary`, cut to 160 characters, and the whole text (up
+to 4000 characters) as `detail` when it says more.
 
 ## Owners
 

@@ -21,6 +21,8 @@ export class UsageMeter {
    */
   limitHit: { resetsAt?: number } | null = null;
   limitHits = 0;
+  /** The runtime could not sign in, such as an expired OAuth session (AO-0150). */
+  authFailed = false;
 
   get tokens(): number {
     if (this.claudeResult !== null) return this.claudeResult;
@@ -57,7 +59,7 @@ export class UsageMeter {
     }
     if (line[0] !== '{') {
       // Plain text counts only as the runtime's own error line, never as an agent's prose.
-      if (ERROR_LINE_RE.test(line)) this.checkLimit(line);
+      if (ERROR_LINE_RE.test(line)) this.checkError(line);
       return;
     }
     let ev: Record<string, unknown>;
@@ -70,14 +72,17 @@ export class UsageMeter {
       const msg = ev.message as { id?: string; usage?: Usage } | undefined;
       if (msg?.usage)
         this.claudeMessages.set(msg.id ?? String(this.claudeMessages.size), count(msg.usage));
+      // Claude Code marks its own API error message; an agent's prose never sets this field.
+      if (ev.error === 'authentication_failed') this.authFailed = true;
     } else if (ev.type === 'result') {
       if (ev.usage) this.claudeResult = count(ev.usage as Usage);
-      if (ev.is_error) this.checkLimit(String(ev.result ?? ''));
+      if (ev.is_error) this.checkError(String(ev.result ?? ''));
     } else if (ev.type === 'error' || ev.type === 'turn.failed') {
       const err = ev.error as { type?: string; message?: string } | undefined;
       // The API's own error type, whatever the message says.
       if (err?.type === 'rate_limit_error') this.checkLimit('rate_limit_error');
-      else this.checkLimit(String(ev.message ?? err?.message ?? ''));
+      else if (err?.type === 'authentication_error') this.authFailed = true;
+      else this.checkError(String(ev.message ?? err?.message ?? ''));
     } else if (ev.type === 'rate_limit_event') {
       this.rateLimit = ev.rate_limit_info ?? null;
       this.rateLimitSeen++;
@@ -88,6 +93,12 @@ export class UsageMeter {
       this.codexTurns +=
         (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0) + (u.output_tokens ?? 0);
     }
+  }
+
+  /** Notes a runtime error that is a usage limit or a failed sign-in. */
+  private checkError(text: string): void {
+    this.checkLimit(text);
+    if (text && AUTH_RE.test(text)) this.authFailed = true;
   }
 
   /** Notes a usage-limit error; Claude Code's older format ends in `|<reset epoch seconds>`. */
@@ -105,6 +116,10 @@ const ERROR_LINE_RE = /^(api )?error\b/i;
 /** What providers print when a plan's usage limit or an API rate limit stops work. */
 const LIMIT_RE =
   /usage limit (reached|hit|has been reached)|hit your usage limit|rate_limit_error|exceeded your (current )?quota/i;
+
+/** What runtimes print when they cannot sign in: an expired session, no login, a bad API key. */
+const AUTH_RE =
+  /authentication_failed|authentication_error|failed to authenticate|oauth (session|token) (has )?expired|not logged in|please run \/login|invalid api key|401 unauthorized/i;
 
 interface Usage {
   input_tokens?: number;

@@ -3,11 +3,12 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { initRoot } from '@agent-ops/core';
 import type { Check } from '../src/index.js';
-import { doctor, formatChecks } from '../src/index.js';
+import { bundledSkillFile, doctor, formatChecks } from '../src/index.js';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -134,6 +135,64 @@ describe('ops doctor', () => {
       status: 'warn',
       detail: expect.stringContaining('is skipped'),
     });
+  });
+
+  it('warns about user-level skill copies that differ from the shipped skill', async () => {
+    const cwd = temp();
+    const config = join(cwd, 'config.yml');
+    writeFileSync(config, 'me: human:dawid\n');
+    const bundled = join(temp(), 'SKILL.md');
+    writeFileSync(bundled, '# Agent Ops\n\n## Rules\n\nr\n\n## Writing event text\n\nw\n');
+    const home = temp();
+    const claudeDir = temp();
+    const codexHome = temp();
+    const copy = (dir: string, text: string): string => {
+      const file = join(dir, 'skills', 'agent-ops', 'SKILL.md');
+      mkdirSync(join(dir, 'skills', 'agent-ops'), { recursive: true });
+      writeFileSync(file, text);
+      return file;
+    };
+    const stale = copy(claudeDir, '# Agent Ops\n\n## Rules\n\nr\n');
+    // Windows line ends from a checkout with autocrlf still match.
+    const same = copy(
+      codexHome,
+      '# Agent Ops\r\n\r\n## Rules\r\n\r\nr\r\n\r\n## Writing event text\r\n\r\nw\r\n',
+    );
+    const agents = copy(
+      join(home, '.agents'),
+      '# Agent Ops\n\n## Rules\n\nr, older\n\n## Writing event text\n\nw\n',
+    );
+    const env = envFor(config, { CLAUDE_CONFIG_DIR: claudeDir, CODEX_HOME: codexHome });
+
+    const checks = await doctor({ env, cwd, home, skillFile: bundled });
+    expect(byId(checks, `skill:${stale}`)).toMatchObject({
+      label: 'Claude Code skill',
+      status: 'warn',
+      detail: expect.stringContaining('it lacks: Writing event text'),
+      fix: `copy ${bundled} over it`,
+    });
+    expect(byId(checks, `skill:${same}`)).toMatchObject({ label: 'Codex skill', status: 'ok' });
+    expect(byId(checks, `skill:${agents}`)?.status).toBe('warn');
+    expect(byId(checks, `skill:${agents}`)?.detail).not.toContain('lacks');
+    expect(formatChecks(checks)).toContain(`warn  Claude Code skill: ${stale} differs`);
+
+    // No shipped skill, nothing to compare with: no skill checks.
+    const none = await doctor({ env, cwd, home, skillFile: null });
+    expect(none.filter((c) => c.id.startsWith('skill:'))).toEqual([]);
+  });
+
+  it('finds the skill of a source checkout', () => {
+    expect(bundledSkillFile()).toBe(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        '..',
+        '..',
+        '..',
+        'skills',
+        'agent-ops',
+        'SKILL.md',
+      ),
+    );
   });
 
   it('fails an opsd config that does not validate', async () => {

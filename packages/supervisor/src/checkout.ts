@@ -67,6 +67,21 @@ export class Checkout {
     }
   }
 
+  /** The repo's worktrees, this one too: each one's folder and branch (null when detached). */
+  worktrees(): Array<{ path: string; branch: string | null }> {
+    const out: Array<{ path: string; branch: string | null }> = [];
+    let cur: { path: string; branch: string | null } | undefined;
+    for (const field of this.git(['worktree', 'list', '--porcelain', '-z']).split('\0')) {
+      if (field.startsWith('worktree ')) {
+        cur = { path: field.slice('worktree '.length), branch: null };
+        out.push(cur);
+      } else if (cur && field.startsWith('branch ')) {
+        cur.branch = field.slice('branch '.length).replace(/^refs\/heads\//, '');
+      }
+    }
+    return out;
+  }
+
   /**
    * The pathspecs that leave out task stores and the repo's linked worktrees inside this
    * checkout. A run makes its code branch in a worktree such as `out/wt-<ID>` (AO-0135); a repo

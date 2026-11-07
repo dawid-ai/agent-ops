@@ -72,6 +72,8 @@ export interface Question {
   event: string;
   from: string;
   summary: string;
+  /** The whole question when it is longer than `summary`, its first line. */
+  detail?: string;
 }
 
 export interface InboxItem {
@@ -85,7 +87,10 @@ export interface InboxItem {
   type?: string;
   summary: string;
   at?: string;
-  /** review: the full request text; `summary` is its first line. */
+  /**
+   * The full text when it says more than `summary`, its first line: a review request, message,
+   * question or channel mention. Rendered as Markdown.
+   */
   detail?: string;
   pr?: string;
   commit?: string;
@@ -169,6 +174,20 @@ export interface ProviderUsage {
   plan?: string;
   paused: string | null;
   live: number;
+  /** Set while the provider is signed out: no run of it starts until it is signed in. */
+  signed_out?: SignedOut;
+}
+
+/** A signed-out provider, from `GET /api/usage` (AO-0154). */
+export interface SignedOut {
+  since: string;
+  run?: string;
+  task?: string;
+  /** How to sign in again, such as "run `codex login`". */
+  steps: string;
+  /** opsd checks the sign-in by itself; false: it tries one run an hour. */
+  check: boolean;
+  next: string;
 }
 
 /** Work waking agents could start, and why no run has started on it. */

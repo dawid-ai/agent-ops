@@ -9,6 +9,22 @@ const scratch = mkdtempSync(join(tmpdir(), 'ops-test-env-'));
 process.env.OPS_CONFIG = join(scratch, 'config.yml');
 process.env.OPS_STATE_DIR = join(scratch, 'opsd');
 
+// Git settings for test repos only, passed to every git process through the environment. They
+// change no behavior the tests check; they drop work that costs a process or a disk flush per
+// call, which on Windows adds up in the git-heavy tests: background maintenance and `gc --auto`
+// after commits, fetches and pushes, and an fsync of each object.
+const testGitConfig: Array<[string, string]> = [
+  ['maintenance.auto', 'false'],
+  ['gc.auto', '0'],
+  ['receive.autogc', 'false'],
+  ['core.fsync', 'none'],
+];
+process.env.GIT_CONFIG_COUNT = String(testGitConfig.length);
+testGitConfig.forEach(([key, value], i) => {
+  process.env[`GIT_CONFIG_KEY_${i}`] = key;
+  process.env[`GIT_CONFIG_VALUE_${i}`] = value;
+});
+
 // The runner moves from test to test on microtasks only, so a file of synchronous tests (git via
 // execFileSync) never lets the worker read its IPC replies. Once such a file runs past 60 s, the
 // worker's pending `onTaskUpdate` call times out even though the reply is already waiting, and the

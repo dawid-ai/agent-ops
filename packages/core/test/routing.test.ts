@@ -96,6 +96,25 @@ describe('routes for ownerless work', () => {
     expect(ws.routes(['claude:engineer'])).toEqual([]);
   });
 
+  it('lets opsd hand unclaimed work of a signed-out provider to another agent (AO-0154)', () => {
+    const { as } = setup();
+    const h = as('human:dawid');
+    const t = h.newTask({ title: 'sent back', owner: 'claude:engineer' });
+    expect(() => as('codex:engineer').handoff(t.id, 'codex:engineer', 'mine now')).toThrow(
+      /owned by claude:engineer/,
+    );
+    const res = as('opsd:runtime').handoff(t.id, 'codex:engineer', 'claude is signed out');
+    expect(res.view.owner).toBe('codex:engineer');
+    expect(res.events).toMatchObject([
+      { type: 'handoff', actor: 'opsd:runtime', to: 'codex:engineer' },
+    ]);
+    // A claimed task stays with whoever holds it.
+    as('codex:engineer').start(t.id);
+    expect(() => as('opsd:runtime').handoff(t.id, 'claude:engineer', 'back')).toThrow(
+      /held by codex:engineer/,
+    );
+  });
+
   it('keeps a blocked task waiting when it routes it', () => {
     const { as } = setup();
     const h = as('human:dawid');

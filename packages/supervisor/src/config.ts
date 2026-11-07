@@ -31,6 +31,12 @@ export interface RuntimeConfig {
   pause_at?: number;
   /** Paused from Settings: opsd starts no new runs on this provider; live runs go on. */
   paused?: boolean;
+  /**
+   * Arguments, after `command` and `args`, of a status command that says whether the runtime is
+   * signed in without calling a model (AO-0154). Defaults: `auth status` for Claude, `login
+   * status` for Codex. `false`: no such command, so a signed-out runtime gets one run an hour.
+   */
+  sign_in_check?: string[] | false;
 }
 
 /** Limits for one role (the part after the colon), counted over every provider. */
@@ -165,6 +171,11 @@ export interface OpsdConfig {
   /** Minutes to pause a provider whose usage-limit error names no reset time. */
   usage_cooldown_minutes: number;
   /**
+   * Minutes a task owned by name by an agent of a signed-out provider waits before opsd hands it
+   * to the same role on another provider (AO-0154). 0 never hands it over.
+   */
+  signed_out_handoff_minutes: number;
+  /**
    * Tasks waiting for review in one project at which opsd starts no new work there for roles
    * that write, and lets reviewers burst, so reviews catch up before more work piles on.
    */
@@ -271,6 +282,7 @@ export function opsdConfig(user: UserConfig & { opsd?: Partial<OpsdConfig> }): O
     roles: raw.roles ?? {},
     review_backlog: raw.review_backlog ?? 3,
     usage_cooldown_minutes: raw.usage_cooldown_minutes ?? 30,
+    signed_out_handoff_minutes: raw.signed_out_handoff_minutes ?? 15,
     budget_minutes: raw.budget_minutes ?? 180,
     wake_cooldown_minutes: raw.wake_cooldown_minutes ?? 10,
     sync: raw.sync ?? true,
@@ -314,6 +326,17 @@ export function opsdConfig(user: UserConfig & { opsd?: Partial<OpsdConfig> }): O
       throw new OpsError(`opsd.runtimes.${name}.paused: use true or false`, 2);
     }
     if (rc.model !== undefined) checkModel(rc.model, `opsd.runtimes.${name}.model`);
+    const check = rc.sign_in_check;
+    if (
+      check !== undefined &&
+      check !== false &&
+      (!Array.isArray(check) || check.length === 0 || check.some((a) => typeof a !== 'string'))
+    ) {
+      throw new OpsError(
+        `opsd.runtimes.${name}.sign_in_check: use a list of arguments, such as [auth, status], or false`,
+        2,
+      );
+    }
   }
   for (const [name, r] of Object.entries(cfg.roles)) {
     if (r.per_project !== undefined) count(r.per_project, `roles.${name}.per_project`, 0);
@@ -350,6 +373,7 @@ export function opsdConfig(user: UserConfig & { opsd?: Partial<OpsdConfig> }): O
     if (a.model !== undefined) checkModel(a.model, `opsd.agents.${id}.model`);
   }
   count(cfg.usage_cooldown_minutes, 'usage_cooldown_minutes', 1);
+  count(cfg.signed_out_handoff_minutes, 'signed_out_handoff_minutes', 0);
   if (
     typeof cfg.usage_pause_at !== 'number' ||
     !(cfg.usage_pause_at > 0 && cfg.usage_pause_at <= 1)

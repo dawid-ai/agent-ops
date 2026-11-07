@@ -63,6 +63,29 @@ interface Side {
   touched: Set<string>;
   copied: number;
   renamed: string[];
+  /**
+   * File names in the upstream tree by folder (repo-relative, `/`-separated), for the side's
+   * root. Read once per mirror on first use: the upstream does not move during a mirror.
+   */
+  pushed?: Map<string, string[]>;
+}
+
+/** Names of the files the upstream holds in one folder of a side's root. */
+function pushedIn(s: Side, rel: string): string[] {
+  if (!s.pushed) {
+    s.pushed = new Map();
+    const scope = posix(relative(s.top, s.root.dir));
+    const out = git(s.top, ['ls-tree', '-r', '--name-only', '@{u}', '--', scope || '.']) ?? '';
+    for (const p of out.split('\n')) {
+      const slash = p.lastIndexOf('/');
+      if (!p || slash === -1) continue;
+      const dir = p.slice(0, slash);
+      const list = s.pushed.get(dir);
+      if (list) list.push(p.slice(slash + 1));
+      else s.pushed.set(dir, [p.slice(slash + 1)]);
+    }
+  }
+  return s.pushed.get(rel) ?? [];
 }
 
 function git(cwd: string, args: string[]): string | null {
@@ -83,13 +106,17 @@ function posix(p: string): string {
 }
 
 function side(root: Root, owner: Root): Side {
-  const top = (git(root.dir, ['rev-parse', '--show-toplevel']) ?? '').trim();
+  // One call reads both when the branch has an upstream; it fails as a whole when it has none.
+  const both = git(root.dir, ['rev-parse', '--show-toplevel', '--abbrev-ref', '@{u}']);
+  const top = (both ?? git(root.dir, ['rev-parse', '--show-toplevel']) ?? '')
+    .split('\n')[0]!
+    .trim();
   if (!top) throw new Error(`${root.dir} is not inside a git repo`);
   return {
     root,
     owner,
     top,
-    upstream: git(top, ['rev-parse', '--abbrev-ref', '@{u}']) !== null,
+    upstream: both !== null,
     kept: readMirrored(owner),
     keptChanged: false,
     touched: new Set(),
@@ -168,12 +195,7 @@ function stableEvents(s: Side, dir: string): Set<string> {
   // Without an upstream nothing is ever renamed, so every file is final.
   if (!s.upstream) return new Set(names);
   const rel = posix(relative(s.top, dir));
-  const pushed = new Set(
-    (git(s.top, ['ls-tree', '-r', '--name-only', '@{u}', '--', rel]) ?? '')
-      .split('\n')
-      .filter(Boolean)
-      .map((p) => p.slice(rel.length + 1)),
-  );
+  const pushed = new Set(pushedIn(s, rel));
   return new Set(names.filter((n) => pushed.has(n) || s.kept.has(`${rel}/${n}`)));
 }
 
@@ -294,11 +316,7 @@ function mirrorTask(
     const rel = posix(relative(to.top, toDir));
     const pushed = new Set<string>();
     if (to.upstream) {
-      for (const f of (git(to.top, ['ls-tree', '-r', '--name-only', '@{u}', '--', rel]) ?? '')
-        .split('\n')
-        .filter(Boolean)) {
-        pushed.add(f.slice(rel.length + 1, rel.length + 27));
-      }
+      for (const f of pushedIn(to, rel)) pushed.add(f.slice(0, 26));
     }
     for (const k of to.kept)
       if (k.startsWith(`${rel}/`)) pushed.add(k.slice(rel.length + 1, rel.length + 27));
@@ -578,7 +596,8 @@ export function syncAll(
     master !== undefined && r.isMirror && samePath(dirname(dirname(r.dir)), master.dir);
   const out = new Map<Root, { root: Root; result: SyncResult; mirror?: MirrorResult }>();
   const run = (r: Root): void => {
-    const result = syncRoot(r, user, opts);
+    // A second run commits and pushes what the mirror copied in; the first run just pulled.
+    const result = syncRoot(r, user, out.has(r) ? { ...opts, skipPull: true } : opts);
     const prev = out.get(r);
     if (prev) merge(prev.result, result);
     else out.set(r, { root: r, result });

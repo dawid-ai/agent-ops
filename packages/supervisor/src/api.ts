@@ -112,6 +112,9 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
   sup.on('run', onRun);
   sup.on('warn', onWarn);
   sup.on('sync', onSync);
+  // A provider was signed out or signed in again: the app's banner reads `/api/usage` again.
+  const onSignIn = (): void => broadcast('signin', {});
+  sup.on('signin', onSignIn);
   // The chat: `streaming` carries the live reply so far, `changed` a new message or state.
   const onChat = (data: unknown): void => broadcast('chat', data);
   sup.on('chat', onChat);
@@ -178,6 +181,12 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
     };
 
     if (method === 'GET' && area === 'usage') return send(res, 200, sup.usageReport());
+    // The app's Resume on a signed-out provider, and `ops daemon resume` (AO-0154).
+    if (method === 'POST' && area === 'signin' && id === 'resume') {
+      humanOnly('resuming a signed-out provider');
+      const provider = str(body.provider);
+      return send(res, 200, { resumed: sup.resumeSignIn(provider), providers: sup.usageReport() });
+    }
     if (area === 'settings') {
       if (method === 'POST') humanOnly('changing settings');
       if (method === 'POST') applySettings(sup, (body.patch ?? body) as SettingsPatch);
@@ -493,6 +502,30 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
       const w = reportWindow({ days: q.get('days'), from: q.get('from'), to: q.get('to') });
       return send(res, 200, buildReport(wsAs(), sup.runs(), w.from, w.to));
     }
+    if (method === 'GET' && area === 'timeline') {
+      // The replay timeline of `project` (or of every project) in `root` (or every root), for
+      // the report's window (`days`, or `from` and `to`). `clip` scales playback to that many
+      // seconds; `gap` is the minutes an idle stretch plays as (default 30).
+      const w = reportWindow(
+        { days: q.get('days'), from: q.get('from'), to: q.get('to') },
+        Date.now(),
+        'timeline',
+      );
+      const clip = wholeParam(q.get('clip'), 'clip', 1, 3600);
+      const gap = wholeParam(q.get('gap'), 'gap', 1, 1440);
+      return send(
+        res,
+        200,
+        wsAs().timeline({
+          root: q.get('root') || undefined,
+          project: q.get('project') || undefined,
+          from: w.from,
+          to: w.to,
+          ...(clip !== undefined ? { clipMs: clip * 1000 } : {}),
+          ...(gap !== undefined ? { maxGapMs: gap * 60_000 } : {}),
+        }),
+      );
+    }
     if (method === 'GET' && area === 'activity') {
       // One page, newest first: `q` filters (words, `agent:`, `task:`, `kind:`; see
       // parseActivityQuery), `before` is the `next` of the page before.
@@ -620,6 +653,7 @@ export function startApi(sup: Supervisor, opts: ApiOptions): Promise<ApiServer> 
             sup.off('run', onRun);
             sup.off('warn', onWarn);
             sup.off('sync', onSync);
+            sup.off('signin', onSignIn);
             sup.off('chat', onChat);
             sup.off('tick', checkTasks);
             server.close(() => done());
@@ -637,6 +671,16 @@ function str(v: unknown): string | undefined {
 function need(v: unknown, name: string): string {
   if (typeof v !== 'string' || !v) throw new HttpError(400, `missing ${name}`);
   return v;
+}
+
+/** A whole number from `min` to `max` in a query parameter, or undefined when it is not given. */
+function wholeParam(v: string | null, name: string, min: number, max: number): number | undefined {
+  if (v === null || v === '') return undefined;
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || n < min || n > max) {
+    throw new HttpError(400, `${name}: use a whole number from ${min} to ${max}`);
+  }
+  return n;
 }
 
 /** A repeat from a request body; text fields only, `labels` and `days` as lists or text. */

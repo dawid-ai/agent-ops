@@ -23,7 +23,7 @@ import { seedOnStart } from './seed.js';
 import { isAlive, PROC_START_TIMEOUT_MS, processStartSync } from './proc.js';
 import { Supervisor } from './supervisor.js';
 
-export const OPSD_VERSION = '0.2.0-beta.2';
+export const OPSD_VERSION = '0.2.0-beta.3';
 
 /**
  * When the code opsd runs was built: the newest `.js` file of the supervisor and core packages.

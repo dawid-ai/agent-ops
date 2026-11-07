@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach } from 'vitest';
@@ -22,11 +22,20 @@ export function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
 }
 
+/** The identity test repos commit with; written to `.git/config` directly. */
+export const TEST_IDENTITY = [
+  '[user]',
+  '\tname = Test',
+  '\temail = test@example.invalid',
+  '[commit]',
+  '\tgpgsign = false',
+  '',
+].join('\n');
+
 export function gitRepo(dir = tempDir()): string {
   git(dir, 'init', '-q', '-b', 'main');
-  git(dir, 'config', 'user.name', 'Test');
-  git(dir, 'config', 'user.email', 'test@example.invalid');
-  git(dir, 'config', 'commit.gpgsign', 'false');
+  // One file write instead of three `git config` processes, which cost tens of ms each on Windows.
+  appendFileSync(join(dir, '.git', 'config'), TEST_IDENTITY);
   return dir;
 }
 

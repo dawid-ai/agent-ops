@@ -360,6 +360,96 @@ describe('collaboration commands', () => {
   });
 });
 
+describe('multi-line event text (AO-0143)', () => {
+  const MD = '## Done\n\n- parser in `core/fold.ts`\n- tests\n\n## Next\n\n- docs';
+
+  /** `ops` with `stdin` as what the command reads from standard input. */
+  function piped(cwd: string, actor: string, stdin: string, ...argv: string[]) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const env = { OPS_CONFIG: join(cwd, 'none.yml'), OPS_AGENT: actor } as NodeJS.ProcessEnv;
+    const io = { out: (l: string) => out.push(l), err: (l: string) => err.push(l), env, cwd };
+    const code = run(argv, { ...io, readStdin: () => stdin });
+    return { code, out: out.join('\n'), err: err.join('\n') };
+  }
+
+  function bodies(d: string): Record<string, string> {
+    const shown = JSON.parse(ops(d, 'human:dawid', 'show', '1', '--json').out) as {
+      events: Array<{ type: string; body: string }>;
+    };
+    return Object.fromEntries(shown.events.map((e) => [e.type, e.body.trim()]));
+  }
+
+  function started(): string {
+    const d = repo();
+    ops(d, 'human:dawid', 'init', '--name', 'demo', '--human', 'human:dawid');
+    ops(d, 'human:dawid', 'new', 'Parse', 'events', '--to', 'claude:writer');
+    ops(d, 'claude:writer', 'start', '1');
+    return d;
+  }
+
+  it('keeps newlines from --body-file, with Windows line ends made plain', () => {
+    const d = started();
+    writeFileSync(join(d, 'f.md'), MD.replace(/\n/g, '\r\n'));
+    expect(ops(d, 'claude:writer', 'checkpoint', '1', '--body-file', 'f.md').code).toBe(0);
+    expect(bodies(d).checkpoint).toBe(MD);
+    const shown = JSON.parse(ops(d, 'human:dawid', 'show', '1', '--json').out) as {
+      task: { checkpoint: { summary: string } };
+    };
+    expect(shown.task.checkpoint.summary).toBe(MD);
+  });
+
+  it('reads stdin for --body-file - and for a lone - argument', () => {
+    const d = started();
+    expect(piped(d, 'claude:writer', MD, 'progress', '1', '--body-file', '-').code).toBe(0);
+    expect(piped(d, 'claude:writer', MD, 'comment', '1', '-', '--to', 'human:dawid').code).toBe(0);
+    const b = bodies(d);
+    expect(b.progress).toBe(MD);
+    expect(b.comment).toBe(MD);
+    // A dash among other words is text, not stdin.
+    expect(piped(d, 'claude:writer', 'unused', 'progress', '1', 'a', '-', 'b').code).toBe(0);
+    expect(bodies(d).progress).toBe('a - b');
+  });
+
+  it('keeps newlines from -m and passes the whole text to the inbox as detail', () => {
+    const d = started();
+    expect(ops(d, 'claude:writer', 'ask', '1', '-m', `Which parser?\n\n${MD}`).code).toBe(0);
+    expect(bodies(d).ask).toBe(`Which parser?\n\n${MD}`);
+    const inbox = JSON.parse(ops(d, 'human:dawid', 'inbox', '--json').out) as Array<{
+      kind: string;
+      summary: string;
+      detail?: string;
+    }>;
+    const ask = inbox.find((i) => i.kind === 'ask');
+    expect(ask?.summary).toBe('Which parser?');
+    expect(ask?.detail).toBe(`Which parser?\n\n${MD}`);
+  });
+
+  it('prints a multi-line body in show as indented lines under the event', () => {
+    const d = started();
+    ops(d, 'claude:writer', 'comment', '1', '-m', 'Summary line\n- one\n- two');
+    const out = ops(d, 'human:dawid', 'show', '1').out;
+    expect(out).toMatch(/comment: Summary line\n {4}- one\n {4}- two/);
+  });
+
+  it('keeps newlines in finding and channel post bodies', () => {
+    const d = started();
+    expect(ops(d, 'claude:writer', 'finding', 'Slow', 'fold', '--task', '1', '-m', MD).out).toBe(
+      'T-0002',
+    );
+    const f = JSON.parse(ops(d, 'human:dawid', 'show', '2', '--json').out) as { body: string };
+    expect(f.body.trim()).toBe(MD);
+    const post = piped(d, 'claude:writer', MD, 'channel', 'post', 'dev', '--body-file', '-');
+    expect(post.code).toBe(0);
+    const msgs = JSON.parse(
+      ops(d, 'human:dawid', 'channel', 'read', 'dev', '--json').out,
+    ) as Array<{
+      body: string;
+    }>;
+    expect(msgs[0]?.body.trim()).toBe(MD);
+  });
+});
+
 describe('agent ids nothing defines', () => {
   it('refuses them as owner or reviewer, warns on unmatched wildcards, and flags stranded work', () => {
     const d = repo();

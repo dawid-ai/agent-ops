@@ -17,6 +17,7 @@ export * from './search.js';
 export * from './search-index.js';
 export * from './secrets.js';
 export * from './sync.js';
+export * from './timeline.js';
 export * from './mirror.js';
 export * from './presence.js';
 export * from './ulid.js';

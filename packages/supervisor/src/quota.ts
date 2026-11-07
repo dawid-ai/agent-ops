@@ -133,7 +133,8 @@ export function usagePause(
   return null;
 }
 
-function clock(ms: number): string {
+/** A time for messages: `2026-11-06 13:10 UTC`. */
+export function clock(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
 }
 

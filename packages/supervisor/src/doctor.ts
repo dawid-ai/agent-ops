@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statfsSync, statSync } from 'node:fs';
 import { freemem, homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import type { UserConfig } from '@agent-ops/core';
 import { userConfigPath, Workspace } from '@agent-ops/core';
@@ -31,6 +32,8 @@ export interface DoctorOptions {
   /** Free bytes on the disk that holds `dir`, or null when unknown. */
   diskFree?: (dir: string) => number | null;
   home?: string;
+  /** The agent-ops skill this install ships; null when there is none. Default: `bundledSkillFile()`. */
+  skillFile?: string | null;
 }
 
 /** Disk space below which a root gets a warning: clones, logs and builds need room. */
@@ -79,9 +82,98 @@ function signedIn(runtime: string, env: NodeJS.ProcessEnv, home: string): boolea
 
 const gb = (bytes: number): string => `${(bytes / 2 ** 30).toFixed(1)} GB`;
 
+const SKILL_PATH = join('skills', 'agent-ops', 'SKILL.md');
+
+/**
+ * The agent-ops skill this install ships: `skills/` beside the bundle in the desktop app, or at
+ * the top of a source checkout (three folders up from `packages/supervisor/dist`). Null when
+ * neither exists.
+ */
+export function bundledSkillFile(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let up = 0; up < 4; up++) {
+    const file = join(dir, SKILL_PATH);
+    if (existsSync(file)) return file;
+    dir = dirname(dir);
+  }
+  return null;
+}
+
+/**
+ * User-level copies of the agent-ops skill, which the runtimes load in place of the repo copy:
+ * Claude Code from its config folder, Codex from its home and from `~/.agents`.
+ */
+function userSkillFiles(env: NodeJS.ProcessEnv, home: string): Array<[string, string]> {
+  const dirs: Array<[string, string]> = [
+    ['Claude Code', env.CLAUDE_CONFIG_DIR ?? join(home, '.claude')],
+    ['Codex', env.CODEX_HOME ?? join(home, '.codex')],
+    ['Codex', join(home, '.agents')],
+  ];
+  const seen = new Set<string>();
+  const out: Array<[string, string]> = [];
+  for (const [runtime, dir] of dirs) {
+    const file = join(dir, SKILL_PATH);
+    if (seen.has(file) || !existsSync(file)) continue;
+    seen.add(file);
+    out.push([runtime, file]);
+  }
+  return out;
+}
+
+/** Text with Windows line ends turned into `\n`, so a checkout with autocrlf still matches. */
+const lf = (s: string): string => s.replace(/\r\n/g, '\n');
+
+/** `## ` headings of `want` that `have` lacks, to say what a stale copy misses. */
+function missingSections(want: string, have: string): string[] {
+  const heads = (s: string) =>
+    new Set([...s.matchAll(/^##+ (.+)$/gm)].map((m) => (m[1] ?? '').trim()));
+  const got = heads(have);
+  return [...heads(want)].filter((h) => !got.has(h));
+}
+
+/** One check per user-level skill copy: ok when it matches the shipped skill, else warn. */
+function skillChecks(env: NodeJS.ProcessEnv, home: string, bundled: string | null): Check[] {
+  if (!bundled) return [];
+  let want: string;
+  try {
+    want = lf(readFileSync(bundled, 'utf8'));
+  } catch {
+    return [];
+  }
+  return userSkillFiles(env, home).map(([runtime, file]): Check => {
+    const id = `skill:${file}`;
+    const label = `${runtime} skill`;
+    let have: string;
+    try {
+      have = lf(readFileSync(file, 'utf8'));
+    } catch (err) {
+      return {
+        id,
+        label,
+        status: 'warn',
+        detail: `${file} cannot be read: ${(err as Error).message}`,
+        fix: `copy ${bundled} over it`,
+      };
+    }
+    if (have === want) return { id, label, status: 'ok', detail: `${file} matches this install` };
+    const missing = missingSections(want, have);
+    return {
+      id,
+      label,
+      status: 'warn',
+      detail:
+        `${file} differs from the agent-ops skill this install ships, and ${runtime} loads it ` +
+        `instead of the repo copy` +
+        (missing.length ? `; it lacks: ${missing.join(', ')}` : ''),
+      fix: `copy ${bundled} over it`,
+    };
+  });
+}
+
 /**
  * Checks this machine's setup: user config, data roots, the opsd config, runtimes on PATH and
- * signed in, opsd itself, and free memory and disk. Never throws; every problem is a check.
+ * signed in, user-level copies of the agent-ops skill, opsd itself, and free memory and disk.
+ * Never throws; every problem is a check.
  */
 export async function doctor(opts: DoctorOptions): Promise<Check[]> {
   const { env } = opts;
@@ -252,6 +344,10 @@ export async function doctor(opts: DoctorOptions): Promise<Check[]> {
           },
     );
   }
+
+  // User-level skill copies.
+  const bundled = opts.skillFile === undefined ? bundledSkillFile() : opts.skillFile;
+  for (const c of skillChecks(env, home, bundled)) add(c);
 
   // opsd itself.
   if (opts.self) {

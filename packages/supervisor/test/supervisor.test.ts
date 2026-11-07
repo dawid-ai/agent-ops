@@ -72,6 +72,12 @@ function temp(): string {
 
 /** A fake runtime: reads the prompt, reports token use, then finishes, crashes or hangs. */
 const FAKE_AGENT = `
+if (process.argv.includes('sign-in-status')) {
+  // The runtime's sign-in check (AO-0154), in the shape of \`claude auth status\`.
+  const signedIn = (await import('node:fs')).readFileSync(process.env.FAKE_SIGNIN, 'utf8').trim() === 'in';
+  console.log(JSON.stringify({ loggedIn: signedIn, authMethod: 'fake' }));
+  process.exit(signedIn ? 0 : 1);
+}
 const { Workspace } = await import(${JSON.stringify(pathToFileURL(coreDist).href)});
 // Before stdin: proves the process started, whether or not it ever gets a prompt.
 if (process.env.FAKE_MARK) (await import('node:fs')).writeFileSync(process.env.FAKE_MARK, String(process.ppid));
@@ -79,7 +85,17 @@ if (process.env.FAKE_PID) (await import('node:fs')).writeFileSync(process.env.FA
 let prompt = '';
 for await (const c of process.stdin) prompt += c;
 if (process.env.FAKE_PROMPT) (await import('node:fs')).writeFileSync(process.env.FAKE_PROMPT, prompt);
-const mode = process.env.FAKE_MODE ?? 'done';
+const modeFile = process.env.FAKE_MODE_FILE;
+const mode = (modeFile && (await import('node:fs')).existsSync(modeFile)
+  ? (await import('node:fs')).readFileSync(modeFile, 'utf8').trim()
+  : process.env.FAKE_MODE) ?? 'done';
+if (mode === 'auth') {
+  // What Claude Code prints when its OAuth session expired (AO-0150).
+  const text = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+  console.log(JSON.stringify({ type: 'assistant', message: { id: 'm0', model: '<synthetic>', content: [{ type: 'text', text }] }, error: 'authentication_failed', is_api_error_message: true }));
+  console.log(JSON.stringify({ type: 'result', is_error: true, result: text }));
+  process.exit(1);
+}
 const task = /Work on (\\S+):/.exec(prompt)?.[1];
 const ws = new Workspace({ cwd: process.cwd(), env: process.env });
 console.log(JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 100, output_tokens: 50 } } }));
@@ -160,6 +176,11 @@ function setup(
     runsOutlive?: boolean;
     /** The task repo's folder, under a `temp()` folder; a new temp folder by default. */
     repo?: string;
+    /**
+     * A file holding `in` or `out`: the fake runtime gets a sign-in check that reads it
+     * (AO-0154). Without it, the fake runtime has no sign-in check.
+     */
+    signIn?: string;
   } = {},
 ) {
   const repo = opts.repo ?? temp();
@@ -174,6 +195,7 @@ function setup(
     OPS_CONFIG: join(repo, 'none.yml'),
     OPS_STATE_DIR: state,
     FAKE_MODE: opts.mode ?? 'done',
+    ...(opts.signIn ? { FAKE_SIGNIN: opts.signIn } : {}),
     ...(opts.env ?? {}),
   } as NodeJS.ProcessEnv;
   delete env.OPS_AGENT;
@@ -186,7 +208,12 @@ function setup(
       max_runs: 16,
       ...(opts.opsd ?? {}),
       runtimes: {
-        fake: { command: process.execPath, args: [agentFile] },
+        fake: {
+          command: process.execPath,
+          args: [agentFile],
+          // A wrapped runtime: the check answers only if opsd keeps `args` before it.
+          ...(opts.signIn ? { sign_in_check: ['sign-in-status'] } : {}),
+        },
         ...((opts.opsd?.runtimes as object | undefined) ?? {}),
       },
     },
@@ -209,6 +236,28 @@ function setup(
   const sup = opsd();
   const as = (actor: string) => new Workspace({ cwd: repo, env, actor, user: {}, now: opts.now });
   return { repo, sup, as, state, opsd };
+}
+
+/** A runtime whose runs hang until stopped. */
+const HANG_RUNTIME = { command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'] };
+
+/** An empty commit, so the repo has a HEAD to add worktrees from. */
+function gitCommit(repo: string): void {
+  execFileSync(
+    'git',
+    [
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.com',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'base',
+    ],
+    { cwd: repo, windowsHide: true },
+  );
 }
 
 function ended(sup: Supervisor, id: string, ms = 15_000): Promise<RunRecord> {
@@ -2985,6 +3034,354 @@ describe('usage-limit errors', () => {
     expect(plain.sup.blocker('fake:qa', 'test')).toMatch(/refused work/);
     later += 16 * 60_000;
     expect(plain.sup.blocker('fake:qa', 'test')).toBeNull();
+  });
+});
+
+describe('runtime backoff (AO-0150)', () => {
+  it('reads a failed sign-in from Claude and Codex output, not from an agent prose', () => {
+    const claude = new UsageMeter();
+    claude.feed(
+      JSON.stringify({
+        type: 'assistant',
+        message: { id: 'm0', content: [{ type: 'text', text: 'Failed to authenticate' }] },
+        error: 'authentication_failed',
+      }) + '\n',
+    );
+    expect(claude.authFailed).toBe(true);
+    const result = new UsageMeter();
+    result.feed(JSON.stringify({ type: 'result', is_error: true, result: 'Not logged in' }) + '\n');
+    expect(result.authFailed).toBe(true);
+    const codex = new UsageMeter();
+    codex.feed(JSON.stringify({ type: 'error', message: '401 Unauthorized' }) + '\n');
+    expect(codex.authFailed).toBe(true);
+    const prose = new UsageMeter();
+    prose.feed(
+      JSON.stringify({
+        type: 'assistant',
+        message: { id: 'm1', content: [{ type: 'text', text: 'Failed to authenticate: expired' }] },
+      }) + '\n',
+    );
+    prose.feed(JSON.stringify({ type: 'result', is_error: false, result: 'not logged in' }) + '\n');
+    expect(prose.authFailed).toBe(false);
+  });
+
+  it('stops runs at the first failed sign-in, tells the human once and resumes after the check (AO-0154)', async () => {
+    let now = Date.now();
+    const signIn = join(temp(), 'signin');
+    writeFileSync(signIn, 'out');
+    const { sup, as, opsd } = setup({
+      mode: 'auth',
+      now: () => now,
+      signIn,
+      opsd: { agents: { 'fake:engineer': { wake: true } } },
+    });
+    const human = as('human:dawid');
+    const notices = () =>
+      human.inbox('human:dawid').filter((i) => i.kind === 'mention' && i.from === 'opsd:runtime');
+    const t = human.newTask({ title: 'work', owner: 'fake:engineer' });
+    const review = human.newTask({ title: 'to review', owner: 'other:engineer' });
+    as('other:engineer').start(review.id, 'plan');
+    as('other:engineer').review(review.id, 'check it', 'fake:qa');
+    const r = sup.launch({ agent: 'fake:engineer', task: t.id });
+    await ended(sup, r.id);
+    // The sign-in check runs at once and confirms it; the notice follows.
+    await until(() => sup.signedOut('fake')?.told === true);
+    expect(sup.signedOut('fake')).toMatchObject({ run: r.id, task: `test/${t.id}` });
+    expect(sup.signedOut('fake')?.no_check).toBeUndefined();
+    const why = sup.blocker('fake:engineer', 'test');
+    expect(why).toMatch(
+      /^fake is signed out since .* UTC: sign in to fake again; opsd checks every 3 min/,
+    );
+    // Chat turns, helpers and question runs wait too: they would fail the same way.
+    expect(sup.blocker('fake:qa', 'test', { chat: true })).toBe(why);
+    expect(sup.blocker('fake:qa', 'test', { child: true })).toBe(why);
+    expect(sup.blocker('fake:qa', 'test', { question: true })).toBe(why);
+    expect(() => sup.launch({ agent: 'fake:qa' })).toThrow(/fake is signed out/);
+    expect(sup.usageReport().fake).toMatchObject({
+      paused: why,
+      signed_out: { run: r.id, check: true, steps: 'sign in to fake again' },
+    });
+    expect(sup.waits().find((w) => w.task === `test/${t.id}`)?.reason).toBe(
+      `fake:engineer: ${why}`,
+    );
+    expect(notices()).toHaveLength(1);
+    expect(notices()[0]!.summary).toMatch(
+      new RegExp(`^fake is signed out on this PC: run ${r.id} on test/${t.id} could not sign in`),
+    );
+    const text = human.channel('general').at(-1)!.body;
+    expect(text).toContain('opsd checks the sign-in every 3 minutes');
+    expect(text).toContain('click **Resume** in the app or run `ops daemon resume`');
+    expect(text).toContain(`Reviews that wait for fake: ${review.id}.`);
+
+    // Ticks while it stays signed out: no run, no second notice.
+    for (let i = 0; i < 3; i++) {
+      now += 2 * 60_000;
+      await sup.tick();
+      await until(() => !sup['signInChecking'].has('fake'));
+    }
+    expect(sup.runs()).toHaveLength(1);
+    expect(notices()).toHaveLength(1);
+    // A restart reads the state: it neither starts a run nor tells the human again.
+    const again = opsd();
+    expect(again.signedOut('fake')).toMatchObject({ run: r.id, told: true });
+    await again.checkSignIn('fake');
+    expect(again.blocker('fake:engineer', 'test')).toBe(why);
+    expect(notices()).toHaveLength(1);
+
+    // Signed in again: the next check clears it without a run.
+    writeFileSync(signIn, 'in');
+    now += 3 * 60_000;
+    await sup.tick();
+    await until(() => sup.signedOut('fake') === null);
+    expect(sup.blocker('fake:engineer', 'test')).toBeNull();
+    expect(sup.runs()).toHaveLength(1);
+    expect(notices()).toHaveLength(1);
+  });
+
+  it('checks the sign-in when it starts and starts no run before the check answers', async () => {
+    const signIn = join(temp(), 'signin');
+    writeFileSync(signIn, 'out');
+    const { sup, as } = setup({ signIn, opsd: { agents: { 'fake:engineer': { wake: true } } } });
+    sup.start();
+    expect(sup.blocker('fake:engineer', 'test')).toBe('opsd checks whether fake is signed in');
+    await until(() => sup.signedOut('fake') !== null);
+    expect(sup.blocker('fake:engineer', 'test')).toMatch(/fake is signed out/);
+    const notices = as('human:dawid')
+      .inbox('human:dawid')
+      .filter((i) => i.kind === 'mention' && i.from === 'opsd:runtime');
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.summary).toMatch(/fake is signed out on this PC: its sign-in check says so/);
+  });
+
+  it('without a sign-in check, starts one run an hour to try the sign-in', async () => {
+    let now = Date.now();
+    const modeFile = join(temp(), 'mode');
+    writeFileSync(modeFile, 'auth');
+    const { sup, as } = setup({ now: () => now, env: { FAKE_MODE_FILE: modeFile } });
+    const notices = () =>
+      as('human:dawid')
+        .inbox('human:dawid')
+        .filter((i) => i.kind === 'mention' && i.from === 'opsd:runtime');
+    const r1 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r1.id);
+    expect(sup.signedOut('fake')).toMatchObject({ no_check: true, told: true });
+    expect(sup.blocker('fake:qa', 'test')).toMatch(
+      /opsd starts one fake run to try the sign-in at /,
+    );
+    expect(notices()[0]!.summary).toMatch(/could not sign in/);
+    expect(as('human:dawid').channel('general').at(-1)!.body).toContain(
+      'opsd cannot check the sign-in without a run, so it starts one fake run an hour',
+    );
+    now += 59 * 60_000;
+    expect(sup.blocker('fake:qa', 'test')).not.toBeNull();
+    now += 60_000;
+    // One try at a time: a planned or live run of the provider holds the others.
+    expect(sup.blocker('fake:qa', 'test')).toBeNull();
+    expect(
+      sup.blocker('fake:qa', 'test', { live: [{ agent: 'fake:qa', project: 'test' }] }),
+    ).toMatch(/signed out/);
+    const r2 = sup.launch({ agent: 'fake:qa' });
+    expect(sup.blocker('fake:engineer', 'test')).toMatch(/signed out/);
+    await ended(sup, r2.id);
+    expect(sup.signedOut('fake')).not.toBeNull();
+    expect(notices()).toHaveLength(1);
+    // A run that works clears it.
+    now += 60 * 60_000;
+    writeFileSync(modeFile, 'done');
+    const r3 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r3.id);
+    expect(sup.signedOut('fake')).toBeNull();
+    expect(sup.blocker('fake:qa', 'test')).toBeNull();
+  });
+
+  it('stops trusting a sign-in check that says signed in while runs cannot sign in', async () => {
+    const now = Date.now();
+    const signIn = join(temp(), 'signin');
+    // The check finds stored credentials, but they no longer work.
+    writeFileSync(signIn, 'in');
+    const { sup, as } = setup({ mode: 'auth', now: () => now, signIn });
+    const r1 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r1.id);
+    await until(() => sup.signedOut('fake') === null && !sup['signInChecking'].has('fake'));
+    const r2 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r2.id);
+    expect(sup.signedOut('fake')).toMatchObject({ run: r2.id, no_check: true, told: true });
+    await sup.checkSignIn('fake');
+    expect(sup.signedOut('fake')).not.toBeNull();
+    expect(
+      as('human:dawid')
+        .inbox('human:dawid')
+        .filter((i) => i.kind === 'mention' && i.from === 'opsd:runtime'),
+    ).toHaveLength(1);
+  });
+
+  it('counts a quick error exit, and a run that works clears the count', async () => {
+    let now = Date.now();
+    const modeFile = join(temp(), 'mode');
+    writeFileSync(modeFile, 'crash');
+    const { sup } = setup({ now: () => now, env: { FAKE_MODE_FILE: modeFile } });
+    const r1 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r1.id);
+    expect(sup.blocker('fake:qa', 'test')).toMatch(
+      /fake runs ended with an error within 10 s 1 time\(s\) in a row/,
+    );
+    now += 60_000;
+    writeFileSync(modeFile, 'done');
+    const r2 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r2.id);
+    expect(sup.blocker('fake:qa', 'test')).toBeNull();
+    // The count starts again: one failure waits a minute, not five.
+    writeFileSync(modeFile, 'crash');
+    const r3 = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r3.id);
+    expect(sup.blocker('fake:qa', 'test')).toMatch(/1 time\(s\) in a row/);
+  });
+
+  it('tries a stopped runtime again when the human resumes it in Settings', async () => {
+    let now = Date.now();
+    const modeFile = join(temp(), 'mode');
+    writeFileSync(modeFile, 'crash');
+    const { sup } = setup({ now: () => now, env: { FAKE_MODE_FILE: modeFile } });
+    for (let i = 0; i < 4; i++) {
+      const r = sup.launch({ agent: 'fake:qa' });
+      await ended(sup, r.id);
+      if (i < 3) now += 16 * 60_000;
+    }
+    expect(sup.blocker('fake:qa', 'test')).toMatch(/4 time\(s\) in a row/);
+    // Signed out too, from a run that could not sign in.
+    now += 60 * 60_000;
+    writeFileSync(modeFile, 'auth');
+    const r = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r.id);
+    expect(sup.blocker('fake:qa', 'test')).toMatch(/fake is signed out/);
+    const fake = sup.config.runtimes.fake!;
+    const settings = (paused: boolean): void =>
+      sup.editConfig((doc) =>
+        doc.setIn(['opsd'], { sync: false, runtimes: { fake: { ...fake, paused } } }),
+      );
+    settings(true);
+    expect(sup.blocker('fake:qa', 'test')).toBe('fake is paused in Settings');
+    settings(false);
+    expect(sup.blocker('fake:qa', 'test')).toBeNull();
+    expect(sup.signedOut('fake')).toBeNull();
+  });
+
+  it('resumes a signed-out runtime from the app or ops daemon resume', async () => {
+    const { sup } = setup({ mode: 'auth' });
+    const r = sup.launch({ agent: 'fake:qa' });
+    await ended(sup, r.id);
+    expect(sup.signedOut('fake')).not.toBeNull();
+    expect(sup.resumeSignIn('other')).toEqual([]);
+    expect(sup.resumeSignIn('fake')).toEqual(['fake']);
+    expect(sup.signedOut('fake')).toBeNull();
+    expect(sup.blocker('fake:qa', 'test')).toBeNull();
+    expect(sup.usageReport().fake?.signed_out).toBeUndefined();
+  });
+
+  it('starts role-group work and send-backs of a signed-out provider on the next provider', async () => {
+    let now = Date.now();
+    const { sup, as, repo } = setup({
+      mode: 'hang',
+      now: () => now,
+      opsd: {
+        agents: { 'fake:engineer': { wake: true }, 'other:engineer': { wake: true } },
+        runtimes: { other: HANG_RUNTIME },
+        roles: { engineer: { providers: ['fake', 'other'], writes: false, per_project: 2 } },
+      },
+    });
+    const h = as('human:dawid');
+    // A send-back to fake:engineer, which pinned the task to the signed-out provider (AO-0148).
+    const sent = h.newTask({ title: 'sent back', owner: 'fake:engineer' });
+    const author = as('fake:engineer');
+    author.start(sent.id, 'plan');
+    author.review(sent.id, 'done', 'human:dawid');
+    h.verdict(sent.id, 'changes', 'fix the test');
+    // Its work is in a worktree, as runs make them.
+    gitCommit(repo);
+    const wt = join(repo, 'out', `wt-${sent.id}`);
+    execFileSync('git', ['worktree', 'add', '-q', '-b', `fake/${sent.id.toLowerCase()}`, wt], {
+      cwd: repo,
+      windowsHide: true,
+    });
+    const group = h.newTask({ title: 'group work', owner: '*:engineer' });
+    sup['markSignedOut']('fake', 'check');
+    expect(sup.signedOut('fake')).not.toBeNull();
+    // Role-group work goes to the next provider at once; the send-back waits for the sign-in.
+    await sup.tick();
+    const agentOf = (id: string) =>
+      sup.runs({ live: true }).find((r) => r.task === id)?.agent ?? null;
+    expect(agentOf(group.id)).toBe('other:engineer');
+    expect(agentOf(sent.id)).toBeNull();
+    expect(sup.waits().find((w) => w.task === `test/${sent.id}`)?.reason).toMatch(
+      /^fake:engineer: fake is signed out/,
+    );
+    // After signed_out_handoff_minutes (15), opsd hands it to the same role on the next provider.
+    now += 15 * 60_000;
+    await sup.tick();
+    expect(agentOf(sent.id)).toBe('other:engineer');
+    const handoff = [...h.showEvents(sent.id).events].reverse().find((e) => e.type === 'handoff')!;
+    expect(handoff).toMatchObject({ actor: 'opsd:runtime', to: 'other:engineer' });
+    expect(handoff.body).toContain(`branch \`fake/${sent.id.toLowerCase()}\``);
+    expect(handoff.body).toContain(`wt-${sent.id}`);
+  });
+
+  it('hands no send-back that has a worktree to Codex, which cannot commit there (AO-0155)', () => {
+    let now = Date.now();
+    const { sup, as, repo } = setup({
+      now: () => now,
+      opsd: {
+        agents: { 'fake:engineer': { wake: true }, 'codex:engineer': { wake: true } },
+        runtimes: { codex: HANG_RUNTIME },
+      },
+    });
+    const h = as('human:dawid');
+    const withTree = h.newTask({ title: 'in a worktree', owner: 'fake:engineer' });
+    const plain = h.newTask({ title: 'no worktree', owner: 'fake:engineer' });
+    gitCommit(repo);
+    execFileSync('git', ['worktree', 'add', '-q', join(repo, 'out', `wt-${withTree.id}`)], {
+      cwd: repo,
+      windowsHide: true,
+    });
+    sup['markSignedOut']('fake', 'check');
+    now += 15 * 60_000;
+    sup['signedOutHandoffs']();
+    expect(h.view(withTree.id).owner).toBe('fake:engineer');
+    expect(h.view(plain.id).owner).toBe('codex:engineer');
+  });
+
+  it('gives a send-back that comes after the sign-out its own handoff wait', () => {
+    let now = Date.now();
+    const { sup, as } = setup({
+      now: () => now,
+      opsd: {
+        agents: { 'fake:engineer': { wake: true }, 'other:engineer': { wake: true } },
+        runtimes: { other: HANG_RUNTIME },
+      },
+    });
+    const h = as('human:dawid');
+    const t = h.newTask({ title: 'sent back late', owner: 'fake:engineer' });
+    const author = as('fake:engineer');
+    author.start(t.id, 'plan');
+    author.review(t.id, 'done', 'human:dawid');
+    sup['markSignedOut']('fake', 'check');
+    // Sent back 20 minutes into the sign-out: it waits 15 minutes from the send-back.
+    now += 20 * 60_000;
+    h.verdict(t.id, 'changes', 'fix the test');
+    expect(h.view(t.id).todoSince).toBe(new Date(now).toISOString());
+    sup['signedOutHandoffs']();
+    expect(h.view(t.id).owner).toBe('fake:engineer');
+    now += 14 * 60_000;
+    sup['signedOutHandoffs']();
+    expect(h.view(t.id).owner).toBe('fake:engineer');
+    now += 60_000;
+    sup['signedOutHandoffs']();
+    expect(h.view(t.id).owner).toBe('other:engineer');
+  });
+
+  it('runs the sign-in check after the runtime args', () => {
+    const { sup } = setup({ signIn: join(temp(), 'signin') });
+    const check = sup['signInCheck']('fake') as { file: string; args: string[] };
+    expect(check.args).toEqual([...sup.config.runtimes.fake!.args!, 'sign-in-status']);
   });
 });
 

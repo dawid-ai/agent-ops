@@ -49,6 +49,7 @@ import type {
   WaitItem,
 } from '../types';
 import { ProviderMark, ROLE_ICONS } from '../ui/identity';
+import { Markdown } from '../ui/markdown';
 import { RefText } from '../ui/refs';
 import { RoleEditor } from '../ui/roles';
 
@@ -554,9 +555,7 @@ function Waiting({ waits, nav }: { waits: WaitItem[]; nav: Nav }) {
               </div>
               <div className="mt-1 flex items-start gap-1.5 text-xs text-fg-3">
                 <Hourglass size={12} className="mt-px shrink-0 text-warn" />
-                <span>
-                  <RefText text={w.reason} />
-                </span>
+                <Markdown text={w.reason} clamp lines={2} className="min-w-0 flex-1" />
               </div>
             </div>
             <div className="flex shrink-0 -space-x-1.5">

@@ -5,7 +5,6 @@ describe('IPC allowlist', () => {
   it('passes the calls the page makes', () => {
     expect(allowedCall('GET', '/api/health')).toBe(true);
     expect(allowedCall('GET', '/api/waits')).toBe(true);
-    expect(allowedCall('GET', '/api/usage')).toBe(false);
     expect(allowedCall('GET', '/api/runs/01ABC/procs')).toBe(true);
     expect(allowedCall('POST', '/api/runs/01ABC/procs')).toBe(true);
     expect(allowedCall('POST', '/api/waits')).toBe(false);
@@ -110,6 +109,17 @@ describe('IPC allowlist: chat', () => {
     expect(allowedCall('POST', '/api/chat/reset')).toBe(true);
     expect(allowedCall('GET', '/api/chat/stop')).toBe(false);
     expect(allowedCall('POST', '/api/chat/delete')).toBe(false);
+  });
+});
+
+describe('IPC allowlist: signed-out banner', () => {
+  it('passes reading the sign-in state and Resume, nothing else on those routes', () => {
+    expect(allowedCall('GET', '/api/usage')).toBe(true);
+    expect(allowedCall('POST', '/api/signin/resume')).toBe(true);
+    expect(allowedCall('POST', '/api/usage')).toBe(false);
+    expect(allowedCall('GET', '/api/signin/resume')).toBe(false);
+    expect(allowedCall('POST', '/api/signin/other')).toBe(false);
+    expect(allowedCall('GET', '/api/usage/x')).toBe(false);
   });
 });
 

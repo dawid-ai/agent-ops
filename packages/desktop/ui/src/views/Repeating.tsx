@@ -25,6 +25,7 @@ import {
   cx,
 } from '../components';
 import type { Repeat } from '../types';
+import { Markdown } from '../ui/markdown';
 import { AgentPicker } from '../ui/pickers';
 import { RefText } from '../ui/refs';
 
@@ -224,6 +225,9 @@ export function Repeating({ nav }: { nav: Nav }) {
               <div className="text-sm text-fg-2">
                 <RefText text={r.meta.title} />
               </div>
+              {r.body.trim() && (
+                <Markdown text={r.body} clamp lines={3} className="text-sm text-fg-3" />
+              )}
               {r.note && (
                 <div className="text-xs text-warn">
                   <RefText text={r.note} />

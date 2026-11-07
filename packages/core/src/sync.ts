@@ -23,6 +23,11 @@ export interface SyncOptions {
   sessionEnd?: boolean;
   /** Push even when unpushed commits touch files outside the root. */
   allPaths?: boolean;
+  /**
+   * Skip the pull, even when one is asked for or due: for a second sync right after a pull. A push
+   * the remote rejects still pulls and tries again.
+   */
+  skipPull?: boolean;
   now?: number;
 }
 
@@ -93,15 +98,16 @@ function readStamp(root: Root): SyncStamp {
  * may, else why not.
  *
  * The store's own history decides, not what happens to be checked out: the local branch holding
- * the newest store commit (`ops: ...` under `rel`) is the store branch. `head` qualifies only when
- * it is the one branch that holds that commit, or when no branch holds a store commit yet (a new
- * store starts on the branch it is first committed to). A code branch made from the store branch
+ * the newest store commit (`ops: ...` under the root's folder `dir`) is the store branch. `head`
+ * qualifies only when it is the one branch that holds that commit, or when no branch holds a store
+ * commit yet (a new store starts on the branch it is first committed to). A code branch made from the store branch
  * ties with it until one of them moves; the tie goes to the one branch with an upstream, and with
  * no such branch the first sync holds instead of guessing.
  */
-function firstStoreBranchHold(top: string, rel: string, head: string): string | null {
+function firstStoreBranchHold(dir: string, head: string): string | null {
+  // Run from the root's folder, so the pathspec `.` is the root.
   const newest = (grep: string[]): string =>
-    git(top, ['log', '--branches', '-1', '--format=%H', ...grep, '--', rel]).trim();
+    git(dir, ['log', '--branches', '-1', '--format=%H', ...grep, '--', '.']).trim();
   let tip: string;
   try {
     tip = newest(['--grep=^ops: ']) || newest([]);
@@ -109,7 +115,7 @@ function firstStoreBranchHold(top: string, rel: string, head: string): string | 
     tip = '';
   }
   if (!tip) return null;
-  const refs = git(top, [
+  const refs = git(dir, [
     'for-each-ref',
     '--contains',
     tip,
@@ -135,7 +141,7 @@ function firstStoreBranchHold(top: string, rel: string, head: string): string | 
 }
 
 /**
- * Why the checkout at `top` may not take store commits now, or null when it may.
+ * Why the root's checkout, on branch `head`, may not take store commits now, or null when it may.
  *
  * Store commits go only to the store branch: `sync.branch` in config.yml, else the branch this
  * clone learned on its first sync (kept in `.ops/sync.json`; `learn` records it; see
@@ -144,20 +150,18 @@ function firstStoreBranchHold(top: string, rel: string, head: string): string | 
  * from disk. Held files stay uncommitted on disk instead, and the next sync on the store branch
  * commits them.
  */
-function storeBranchHold(root: Root, top: string, stamp: SyncStamp, learn: boolean): string | null {
-  let head: string;
-  try {
-    head = git(top, ['symbolic-ref', '-q', '--short', 'HEAD']).trim();
-  } catch {
-    head = '';
-  }
+function storeBranchHold(
+  root: Root,
+  head: string,
+  stamp: SyncStamp,
+  learn: boolean,
+): string | null {
   const want = root.config.sync.branch ?? stamp.branch;
   if (!head) {
     return `not synced: HEAD is detached; check out ${want ?? 'the store branch'} and sync again`;
   }
   if (!want) {
-    const rel = relative(top, root.dir).split(sep).join('/') || '.';
-    const hold = firstStoreBranchHold(top, rel, head);
+    const hold = firstStoreBranchHold(root.dir, head);
     if (hold) return hold;
     if (learn) stamp.branch = head;
     return null;
@@ -183,8 +187,62 @@ export function storeBranch(root: Root): string | null {
  * never records a store branch. See {@link syncRoot}.
  */
 export function storeCommitHold(root: Root): string | null {
-  const top = git(root.dir, ['rev-parse', '--show-toplevel']).trim();
-  return storeBranchHold(root, top, readStamp(root), false);
+  let head = '';
+  try {
+    head = git(root.dir, ['symbolic-ref', '-q', '--short', 'HEAD']).trim();
+  } catch {
+    // HEAD is detached, or the root is in no repo at all: this throws for the latter.
+    git(root.dir, ['rev-parse', '--show-toplevel']);
+  }
+  return storeBranchHold(root, head, readStamp(root), false);
+}
+
+/** The checkout's branch, whether its upstream exists, and the changed paths under `rel`. */
+interface CheckoutStatus {
+  /** The checked-out branch; empty when HEAD is detached. */
+  head: string;
+  /** True when the branch has an upstream and its commit is present, as `@{u}` resolves. */
+  upstream: boolean;
+  /** Changed, added and untracked paths, relative to the repo top. */
+  changed: string[];
+}
+
+/** How many space-separated fields come before the path in each porcelain v2 entry type. */
+const V2_FIELDS: Record<string, number> = { '1': 8, '2': 9, u: 10, '?': 1, '!': 1 };
+
+/**
+ * Reads the branch, its upstream and the changes under `rel` in one `git status` call. Each git
+ * process costs tens of milliseconds on Windows, and every sync runs this.
+ */
+function checkoutStatus(top: string, rel: string): CheckoutStatus {
+  const out = git(top, [
+    'status',
+    '--porcelain=v2',
+    '--branch',
+    '-z',
+    '--untracked-files=all',
+    '--',
+    rel,
+  ]);
+  const res: CheckoutStatus = { head: '', upstream: false, changed: [] };
+  const entries = out.split('\0');
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    if (e.startsWith('# branch.head ')) {
+      const head = e.slice('# branch.head '.length);
+      res.head = head === '(detached)' ? '' : head;
+    } else if (e.startsWith('# branch.ab ')) {
+      // Printed only when the upstream is set and its commit is present.
+      res.upstream = true;
+    } else if (V2_FIELDS[e[0] ?? ''] !== undefined && e[1] === ' ') {
+      let at = 0;
+      for (let n = 0; n < V2_FIELDS[e[0]!]! && at !== -1; n++) at = e.indexOf(' ', at + 1);
+      if (at !== -1 && e[0] !== '!') res.changed.push(e.slice(at + 1));
+      // A rename or copy entry is followed by its original path.
+      if (e[0] === '2') i++;
+    }
+  }
+  return res;
 }
 
 /** Decides what an automatic sync does now under the root's policy. */
@@ -320,6 +378,9 @@ function lines(s: string): string[] {
  * every task that got remote events, the events this clone has not pushed are renamed to fresh
  * ids above the newest pushed one, in their local order. Pushed files never change, so every
  * clone folds the same order, and it equals push order: the claim pushed first wins.
+ *
+ * Returns how many commits HEAD is ahead of the upstream when the upstream brought nothing, or
+ * null when it brought commits (the rebase changed the count).
  */
 function pullAndOrder(
   root: Root,
@@ -328,26 +389,31 @@ function pullAndOrder(
   now: number,
   result: SyncResult,
   touched: Map<string, Touched>,
-): void {
+): number | null {
   git(top, ['fetch', '-q']);
-  const base = git(top, ['merge-base', 'HEAD', '@{u}']).trim();
+  const [ahead, behind] = git(top, ['rev-list', '--left-right', '--count', 'HEAD...@{u}'])
+    .trim()
+    .split(/\s+/)
+    .map(Number);
+  result.pulled = true;
+  // The upstream is an ancestor of HEAD: nothing to rebase onto, no remote events.
+  if (behind === 0) return Number.isFinite(ahead) ? ahead! : null;
+
   const scope = prefix ? [prefix.replace(/\/$/, '')] : ['.'];
+  // `HEAD...@{u}` diffs from the merge base of the two to the upstream: what the remote added.
   const incoming = eventPaths(
-    lines(git(top, ['diff', '--name-only', '--diff-filter=A', base, '@{u}', '--', ...scope])),
+    lines(git(top, ['diff', '--name-only', '--diff-filter=A', 'HEAD...@{u}', '--', ...scope])),
     prefix,
   );
-  if (git(top, ['rev-parse', '@{u}']).trim() !== base) {
-    try {
-      git(top, ['rebase', '-q', '--autostash', '@{u}']);
-    } catch (err) {
-      if (!settleTaskMdConflicts(root, top, prefix, result)) {
-        gitOk(top, ['rebase', '--abort']);
-        throw err;
-      }
+  try {
+    git(top, ['rebase', '-q', '--autostash', '@{u}']);
+  } catch (err) {
+    if (!settleTaskMdConflicts(root, top, prefix, result)) {
+      gitOk(top, ['rebase', '--abort']);
+      throw err;
     }
   }
-  result.pulled = true;
-  if (incoming.length === 0) return;
+  if (incoming.length === 0) return null;
 
   const byDir = new Map<string, EventPath>();
   for (const e of incoming) byDir.set(e.dir, e);
@@ -371,6 +437,7 @@ function pullAndOrder(
     result.reordered += res.count;
   }
   commitRenames(top, renamed);
+  return null;
 }
 
 /**
@@ -433,21 +500,18 @@ export function syncRoot(root: Root, user: UserConfig, opts: SyncOptions = {}): 
       pull = true;
       push = true;
     }
+    if (opts.skipPull) pull = false;
 
     // Nothing commits, pulls or pushes while a code branch is checked out in the root's checkout.
-    const hold = storeBranchHold(root, top, stamp, true);
+    const status = checkoutStatus(top, rel);
+    const hold = storeBranchHold(root, status.head, stamp, true);
     if (hold) {
       result.notes.push(hold);
       return result;
     }
 
     // Commit what changed under the root, after a leak check of those files.
-    const status = git(top, ['status', '--porcelain', '-z', '--untracked-files=all', '--', rel]);
-    const changed = status
-      .split('\0')
-      .filter((l) => l.length > 3)
-      .map((l) => l.slice(3))
-      .filter((p) => !p.startsWith(`${prefix}.ops/`));
+    const changed = status.changed.filter((p) => !p.startsWith(`${prefix}.ops/`));
     if (changed.length > 0) {
       const hits = scanFiles(changed.map((p) => join(top, p)));
       if (hits.length > 0) {
@@ -462,22 +526,32 @@ export function syncRoot(root: Root, user: UserConfig, opts: SyncOptions = {}): 
       result.committed = changed.length;
     }
 
-    const upstream = gitOk(top, ['rev-parse', '--abbrev-ref', '@{u}']);
+    const upstream = status.upstream;
     if ((pull || push) && !upstream) {
       result.notes.push('no upstream branch; skipped pull and push');
       pull = false;
       push = false;
     }
     const touched = new Map<string, Touched>();
+    // Commits to push, when the pull already counted them; null when unknown.
+    let knownAhead: number | null = null;
     if (pull) {
-      pullAndOrder(root, top, prefix, now, result, touched);
+      knownAhead = pullAndOrder(root, top, prefix, now, result, touched);
       stamp.lastPull = now;
     }
     if (push) {
       for (let attempt = 1; ; attempt++) {
-        const ahead = Number(git(top, ['rev-list', '--count', '@{u}..HEAD']).trim());
-        const files = git(top, ['log', '--format=', '--name-only', '@{u}..HEAD']).split('\n');
-        const outside = new Set(files.filter((p) => p && !p.startsWith(prefix)));
+        let ahead = 0;
+        const outside = new Set<string>();
+        if (knownAhead !== 0) {
+          // One log call gives both the unpushed commits (one NUL line each) and their files.
+          const log = git(top, ['log', '--format=%x00', '--name-only', '@{u}..HEAD']);
+          for (const l of log.split('\n')) {
+            if (l === '\0') ahead++;
+            else if (l && !l.startsWith(prefix)) outside.add(l);
+          }
+        }
+        knownAhead = null;
         if (ahead === 0) {
           stamp.lastPush = now;
           break;
@@ -500,7 +574,7 @@ export function syncRoot(root: Root, user: UserConfig, opts: SyncOptions = {}): 
           if (attempt >= PUSH_ATTEMPTS || !/rejected|fetch first|non-fast-forward/i.test(msg)) {
             throw err;
           }
-          pullAndOrder(root, top, prefix, now, result, touched);
+          knownAhead = pullAndOrder(root, top, prefix, now, result, touched);
           stamp.lastPull = now;
         }
       }

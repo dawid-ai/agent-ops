@@ -145,6 +145,8 @@ export interface Addressed {
   actor: string;
   to: string;
   summary: string;
+  /** The whole body (cut to 4000 characters) when it is longer than `summary`. */
+  detail?: string;
 }
 
 export interface ReviewRequest {
@@ -196,6 +198,11 @@ export interface TaskState {
    */
   lostClaims: string[];
   delegation: Delegation | null;
+  /**
+   * todo: when the task last became `todo` for its current owner (created, sent back, handed,
+   * released or answered); null in any other status.
+   */
+  todoSince: string | null;
 }
 
 /** Task state after rules that need the clock or other tasks: leases and dependencies. */
