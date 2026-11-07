@@ -1,6 +1,6 @@
 {
   "name": "agent-ops",
-  "version": "0.2.0-beta.3",
+  "version": "0.2.0-beta.4",
   "private": true,
   "description": "A team of AI agents and one human working one queue, with tasks as files in git",
   "license": "MIT",
